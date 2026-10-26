@@ -9,7 +9,7 @@ built with Java 17, deployed with AWS Lambda and exposed through Amazon API Gate
 | # | Point | Workshop section | Status |
 |---|---|---|---|
 | 1 | API design and contract | 4 | Done |
-| 2 | Plain Java implementation | 5 | Pending |
+| 2 | Plain Java implementation | 5 | Done |
 | 3 | Local JUnit tests, mvn test/package, Checkpoint 1 | 6 | Pending |
 | 4 | Deploy a Java function to Lambda, JSON mapping investigation, Checkpoint 2 | 7 | Pending |
 | 5 | Design the HTTP interface with API Gateway (GET /orders/{id}) | 8 | Pending |
@@ -94,3 +94,92 @@ resource was created at that URL.
 **What information should an error response contain?**
 A stable error code (`error`) that client code can branch on, and a human-readable `message` for
 logs/debugging. Both fields are always present; no stack traces or internal details are exposed.
+
+## 2. Plain Java Implementation
+
+The application logic is implemented as an ordinary Java 17 Maven project. At this stage it has
+**no knowledge of HTTP, API Gateway, Lambda or Spring**: the only dependency in `pom.xml` is JUnit,
+and it is `test` scoped.
+
+### 2.1 Project structure
+
+```
+TDSE_Serverless_RestAPI_AWSLambda/
+├── pom.xml
+├── README.md
+└── src/
+    ├── main/java/com/escuelaing/orders/
+    │   ├── model/
+    │   │   ├── Order.java                     immutable order
+    │   │   └── CreateOrderRequest.java        input of the create operation
+    │   ├── exception/
+    │   │   ├── OrderException.java            base error, carries a stable error code
+    │   │   ├── OrderNotFoundException.java    ORDER_NOT_FOUND
+    │   │   └── InvalidOrderException.java     INVALID_ORDER
+    │   ├── repository/
+    │   │   ├── OrderRepository.java           storage port
+    │   │   └── InMemoryOrderRepository.java   orders held in process memory
+    │   └── service/
+    │       ├── OrderIdGenerator.java          source of ids
+    │       ├── SequentialOrderIdGenerator.java  ORD-001, ORD-002, ...
+    │       └── OrderService.java              application logic
+    └── test/java/com/escuelaing/orders/
+```
+
+### 2.2 Operations
+
+`OrderService` offers exactly the three operations of the initial contract, in terms of Java
+objects and exceptions:
+
+| Operation | Signature | Failure |
+|---|---|---|
+| Create | `Order createOrder(CreateOrderRequest request)` | `InvalidOrderException` |
+| Retrieve | `Order getOrder(String id)` | `InvalidOrderException`, `OrderNotFoundException` |
+| Search by customer | `List<Order> getOrdersByCustomer(String customerId)` | `InvalidOrderException` |
+
+`DELETE /orders/{id}` is part of the published contract but is intentionally **not** implemented
+yet: section 17 of the workshop asks for a written prediction before the change is made.
+
+Searching a customer with no orders returns an **empty list, not an error**: the `/orders`
+collection exists, it simply has no match. Only a missing `customerId` is an error.
+
+### 2.3 Design decisions and why
+
+**`OrderRepository` as an interface, with an in-memory implementation.**
+The service depends on a storage port, not on a `Map`. The business logic therefore never changes
+if the orders later move to DynamoDB, and every test can start from a clean repository.
+`InMemoryOrderRepository` uses a `ConcurrentHashMap` because one Lambda container can serve
+requests on several threads, and it offers a `withSampleData()` factory so that a cold Lambda can
+already answer a `GET` before any `POST` reaches that same execution environment.
+
+**Id generation behind an `OrderIdGenerator` interface.**
+`createOrder` assigns the id, never the client. Keeping the generator injectable makes the service
+deterministic under test: a test injects a generator returning a known id and asserts the exact
+value. The default `SequentialOrderIdGenerator` keeps an `AtomicInteger` in process memory, so on
+Lambda the counter restarts on every cold start and is not shared between execution environments.
+That is acceptable for the workshop and is exactly the kind of state that would move to the
+database in a real system.
+
+**`Order` immutable, `CreateOrderRequest` a mutable JavaBean.**
+`Order` is only ever produced by the application and serialized to a response, so it exposes
+getters only. `CreateOrderRequest` is only ever consumed, and it is deliberately a JavaBean with a
+public no-argument constructor and setters, because the AWS Lambda Java runtime deserializes the
+incoming JSON into a POJO with Jackson and needs those members. Java 17 `record` types would read
+better here, and this is a conscious concession to the runtime rather than an oversight; it is
+revisited in the analysis of section 16.
+
+**Validation lives in the service.**
+Rules such as "quantity must be greater than zero" are business rules, so they belong to the
+application and run no matter who calls it. The exceptions carry a stable error code
+(`ORDER_NOT_FOUND`, `INVALID_ORDER`) which is the same code the API contract publishes in the
+`error` field. The application states **what** went wrong; translating that into `400` or `404` is
+the responsibility of whoever exposes it over HTTP, not of the application.
+
+### 2.4 Build
+
+```bash
+mvn compile
+```
+
+The project targets `release 17`, so the generated bytecode is Java 17 (class file major version
+61) and runs on the Lambda `java17` runtime even though it was built with a newer JDK.
