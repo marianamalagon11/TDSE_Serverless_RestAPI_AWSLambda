@@ -2,6 +2,7 @@ package com.escuelaing.orders.lambda;
 
 import com.amazonaws.services.lambda.runtime.Context;
 import com.amazonaws.services.lambda.runtime.RequestHandler;
+import com.escuelaing.orders.exception.OrderException;
 import com.escuelaing.orders.model.CreateOrderRequest;
 import com.escuelaing.orders.model.Order;
 import com.escuelaing.orders.service.OrderService;
@@ -9,11 +10,7 @@ import com.escuelaing.orders.service.OrderService;
 /**
  * Exposes the "create an order" operation of {@link OrderService} as an AWS Lambda function.
  *
- * <p>This is the whole AWS-specific surface of the operation: it implements the runtime interface
- * and does nothing else. It does not validate, it does not build ids and it does not decide HTTP
- * status codes, because none of that belongs here.
- *
- * <p>The runtime does the JSON work on both sides. It deserializes the invocation payload into a
+ * <p>The runtime does the JSON work on both sides: it deserializes the invocation payload into a
  * {@link CreateOrderRequest} and serializes the returned {@link Order} back to JSON, which is why
  * this class never mentions Jackson, strings or streams.
  *
@@ -27,6 +24,12 @@ public class CreateOrderHandler implements RequestHandler<CreateOrderRequest, Or
 
     @Override
     public Order handleRequest(CreateOrderRequest request, Context context) {
-        return SERVICE.createOrder(request);
+        try {
+            return SERVICE.createOrder(request);
+        } catch (OrderException failure) {
+            throw FunctionErrorException.from(failure);
+        } catch (RuntimeException unexpected) {
+            throw FunctionErrorException.internal(unexpected);
+        }
     }
 }

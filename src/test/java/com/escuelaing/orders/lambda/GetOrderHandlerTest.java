@@ -3,8 +3,6 @@ package com.escuelaing.orders.lambda;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-import com.escuelaing.orders.exception.InvalidOrderException;
-import com.escuelaing.orders.exception.OrderNotFoundException;
 import com.escuelaing.orders.model.GetOrderRequest;
 import com.escuelaing.orders.model.Order;
 import org.junit.jupiter.api.Test;
@@ -22,20 +20,24 @@ class GetOrderHandlerTest {
     }
 
     @Test
-    void failsWhenTheOrderDoesNotExist() {
-        OrderNotFoundException error = assertThrows(OrderNotFoundException.class,
+    void reportsAMissingOrderWithTheCodeApiGatewayMapsTo404() {
+        FunctionErrorException error = assertThrows(FunctionErrorException.class,
                 () -> handler.handleRequest(new GetOrderRequest("ORD-999"), null));
 
-        assertEquals("Order ORD-999 does not exist", error.getMessage());
+        assertEquals("{\"error\":\"ORDER_NOT_FOUND\","
+                + "\"message\":\"Order ORD-999 does not exist\"}", error.getMessage());
     }
 
     @Test
-    void failsWhenApiGatewaySendsNoIdAtAll() {
+    void reportsAnEmptyIdWithTheCodeApiGatewayMapsTo400() {
         // A misconfigured mapping template would produce {"id": ""} or an empty document.
-        assertThrows(InvalidOrderException.class,
-                () -> handler.handleRequest(new GetOrderRequest(""), null));
-        assertThrows(InvalidOrderException.class,
-                () -> handler.handleRequest(new GetOrderRequest(null), null));
-        assertThrows(InvalidOrderException.class, () -> handler.handleRequest(null, null));
+        for (GetOrderRequest broken :
+                new GetOrderRequest[] {new GetOrderRequest(""), new GetOrderRequest(null), null}) {
+            FunctionErrorException error = assertThrows(FunctionErrorException.class,
+                    () -> handler.handleRequest(broken, null));
+
+            assertEquals("{\"error\":\"INVALID_ORDER\","
+                    + "\"message\":\"Field 'id' is required\"}", error.getMessage());
+        }
     }
 }

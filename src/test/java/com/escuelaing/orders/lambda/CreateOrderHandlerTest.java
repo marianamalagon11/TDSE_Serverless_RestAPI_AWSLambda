@@ -30,10 +30,21 @@ class CreateOrderHandlerTest {
     }
 
     @Test
-    void letsTheApplicationErrorTravelOutwards() {
-        // Without an HTTP layer there is no status code to choose, so the handler does not catch
-        // the exception: the runtime reports it to the caller as a function error.
-        assertThrows(InvalidOrderException.class, () -> handler.handleRequest(
-                new CreateOrderRequest("CUST-42", "MacBook Air", 0), null));
+    void translatesAnApplicationFailureIntoTheContractedErrorDocument() {
+        FunctionErrorException error = assertThrows(FunctionErrorException.class,
+                () -> handler.handleRequest(new CreateOrderRequest("CUST-42", "MacBook Air", 0), null));
+
+        assertEquals("{\"error\":\"INVALID_ORDER\","
+                + "\"message\":\"Field 'quantity' must be greater than zero\"}", error.getMessage());
+        assertEquals(InvalidOrderException.class, error.getCause().getClass());
+    }
+
+    @Test
+    void reportsAMissingPayloadAsInvalidInput() {
+        FunctionErrorException error =
+                assertThrows(FunctionErrorException.class, () -> handler.handleRequest(null, null));
+
+        assertEquals("{\"error\":\"INVALID_ORDER\","
+                + "\"message\":\"A request body is required\"}", error.getMessage());
     }
 }

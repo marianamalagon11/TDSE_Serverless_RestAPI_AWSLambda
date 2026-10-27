@@ -2,6 +2,7 @@ package com.escuelaing.orders.lambda;
 
 import com.amazonaws.services.lambda.runtime.Context;
 import com.amazonaws.services.lambda.runtime.RequestHandler;
+import com.escuelaing.orders.exception.OrderException;
 import com.escuelaing.orders.model.GetOrderRequest;
 import com.escuelaing.orders.model.Order;
 import com.escuelaing.orders.service.OrderService;
@@ -19,6 +20,12 @@ public class GetOrderHandler implements RequestHandler<GetOrderRequest, Order> {
 
     @Override
     public Order handleRequest(GetOrderRequest request, Context context) {
-        return SERVICE.getOrder(request == null ? null : request.getId());
+        try {
+            return SERVICE.getOrder(request == null ? null : request.getId());
+        } catch (OrderException failure) {
+            throw FunctionErrorException.from(failure);
+        } catch (RuntimeException unexpected) {
+            throw FunctionErrorException.internal(unexpected);
+        }
     }
 }

@@ -30,3 +30,6 @@ target/
 .idea/
 *.iml
 .vscode/
+
+# Deployment artifact, changes on every redeploy
+infrastructure/**/.api-id
