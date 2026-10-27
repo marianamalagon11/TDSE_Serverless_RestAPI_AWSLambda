@@ -14,7 +14,7 @@ built with Java 17, deployed with AWS Lambda and exposed through Amazon API Gate
 | 4 | Deploy a Java function to Lambda, JSON mapping investigation, Checkpoint 2 | 7 | Done |
 | 5 | Design the HTTP interface with API Gateway (GET /orders/{id}) | 8 | Done |
 | 6 | API Gateway mapping templates (non proxy), query params, POST, HTTP semantics, Checkpoint 3 | 9, 10 | Done |
-| 7 | Lambda proxy integration investigation, save example event | 11 | Pending |
+| 7 | Lambda proxy integration investigation, save example event | 11 | Done |
 | 8 | HTTP adapter, implement responses with proxy integration | 12, 13 | Pending |
 | 9 | Compare the two architectures | 14 | Pending |
 | 10 | AI assisted development reflection and criticism of agent decisions | 15, 16 | Pending |
@@ -750,3 +750,85 @@ Finally, the split is not as clean as it looks. The error code had to be pushed 
 message to suit a regular expression, the `Location` header could not be expressed at all, and
 `415` and `403` escape the error format of the contract. The HTTP layer did not disappear, it moved
 into configuration, where it is less visible and harder to verify.
+
+## 7. The Lambda Proxy Integration Event
+
+Architecture B removes the mapping templates: API Gateway stops transforming anything and hands the
+function a single document describing the whole HTTP request. Before writing an adapter for that
+document, it is worth knowing exactly what it contains.
+
+The events in [`docs/proxy-events/`](docs/proxy-events/) are **real**, not copied from the
+documentation. They were captured by deploying a diagnostic function,
+[`EventEchoHandler`](src/main/java/com/escuelaing/orders/lambda/EventEchoHandler.java), behind a
+proxy integration and asking it to answer with the event it received. The whole capture is
+reproducible with
+[`infrastructure/capture-proxy-event.sh`](infrastructure/capture-proxy-event.sh), which creates the
+throwaway API, sends the requests, saves the output and deletes everything again.
+
+The echo function implements `RequestStreamHandler` rather than `RequestHandler` on purpose: that
+interface receives the raw bytes and bypasses the automatic JSON mapping, so nothing is lost to a
+POJO that happens not to declare a field.
+
+### 7.1 Where each piece of the request appears
+
+Captured from `GET /orders/ORD-42`, `GET /orders?customerId=CUST-42&limit=10` and a `POST /orders`:
+
+| Information | Field in the event | Observed value |
+|---|---|---|
+| HTTP method | `httpMethod` | `"GET"`, `"POST"`, `"DELETE"` |
+| Path requested | `path` | `"/orders/ORD-42"` |
+| Route that matched | `resource` | `"/orders/{id}"` |
+| Path parameters | `pathParameters` | `{"id": "ORD-42"}` |
+| Query parameters | `queryStringParameters` | `{"customerId": "CUST-42", "limit": "10"}` |
+| Repeated query parameters | `multiValueQueryStringParameters` | `{"customerId": ["CUST-42"], "limit": ["10"]}` |
+| Headers | `headers` | `Content-Type`, `Host`, `User-Agent`, `X-Forwarded-For`, and any custom header such as `X-Workshop` |
+| Repeated headers | `multiValueHeaders` | the same, as lists |
+| Request body | `body` | `"{\"customerId\":\"CUST-42\",...}"`, **a string, not an object** |
+| Binary body flag | `isBase64Encoded` | `false` |
+| Stage, request id, caller ip, timestamps | `requestContext` | `stage`, `requestId`, `requestTime`, `identity.sourceIp`, `apiId`, `accountId`, and more |
+
+The `sourceIp` and `X-Forwarded-For` values in the saved files were replaced with the documentation
+address `203.0.113.10`, since the originals were a real home IP address.
+
+### 7.2 Four details that matter when writing the adapter
+
+**The body is a string, not a parsed object.** API Gateway does not look inside it. The adapter is
+the one that has to parse it, and it has to be ready for a body that is not valid JSON at all.
+
+**Absent collections arrive as `null`, not as empty maps.** `GET /orders` with no query string has
+`"queryStringParameters": null`, and `/orders` as a resource without path parameters has
+`"pathParameters": null`. Reading them without a null check is the most likely bug in an adapter,
+and the captured events are the proof that it has to be handled.
+
+**`resource` and `path` are different things.** `resource` is the route that matched,
+`/orders/{id}`, which is what routing should be based on. `path` is the concrete URL,
+`/orders/ORD-42`. Using `path` to decide which operation to run means re-parsing a string that API
+Gateway already parsed.
+
+**The shape of `pathParameters` depends on how the resource is declared.** The same request,
+`GET /orders/ORD-42`, produces:
+
+| Declared resource | `resource` | `pathParameters` |
+|---|---|---|
+| `/orders/{id}` | `/orders/{id}` | `{"id": "ORD-42"}` |
+| `/{proxy+}` | `/{proxy+}` | `{"proxy": "orders/ORD-42"}` |
+
+Both are saved, in `get-order-by-id.json` and `greedy-route-same-request.json`. With a greedy route
+the adapter would have to split `"orders/ORD-42"` by hand, which is routing work that API Gateway
+already knows how to do. Architecture B therefore declares the real resources, `/orders` and
+`/orders/{id}`, and keeps API Gateway responsible for routing and for parameter extraction, while
+the adapter becomes responsible for everything else.
+
+A practical note from building the capture: when a single API declared both `/orders/{id}` and a
+root level `/{proxy+}`, every request was dispatched to the greedy route. The two examples were
+captured from separate APIs for that reason.
+
+### 7.3 What this costs and what it buys
+
+The event is large, around 1.5 KB of JSON for a request with no body, and most of it is of no
+interest to the application. In exchange, **every HTTP concern is now expressible in Java**: the
+method, the matched route, the parameters, the headers and the body all arrive as data in a single
+object, so routing, validation, status codes and the response body can be decided in code that
+compiles and that can be tested on a laptop.
+
+That is the trade the next section implements.

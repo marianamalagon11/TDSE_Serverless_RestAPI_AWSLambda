@@ -40,28 +40,7 @@ public class FunctionErrorException extends RuntimeException {
     }
 
     static String toJson(String error, String message) {
-        return "{\"error\":\"" + escape(error) + "\",\"message\":\"" + escape(message) + "\"}";
-    }
-
-    private static String escape(String value) {
-        StringBuilder escaped = new StringBuilder(value.length() + 8);
-        for (int i = 0; i < value.length(); i++) {
-            char character = value.charAt(i);
-            switch (character) {
-                case '"' -> escaped.append("\\\"");
-                case '\\' -> escaped.append("\\\\");
-                case '\n' -> escaped.append("\\n");
-                case '\r' -> escaped.append("\\r");
-                case '\t' -> escaped.append("\\t");
-                default -> {
-                    if (character < 0x20) {
-                        escaped.append(String.format("\\u%04x", (int) character));
-                    } else {
-                        escaped.append(character);
-                    }
-                }
-            }
-        }
-        return escaped.toString();
+        return "{\"error\":\"" + JsonText.escape(error) + "\",\"message\":\""
+                + JsonText.escape(message) + "\"}";
     }
 }
