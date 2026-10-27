@@ -17,7 +17,7 @@ built with Java 17, deployed with AWS Lambda and exposed through Amazon API Gate
 | 7 | Lambda proxy integration investigation, save example event | 11 | Done |
 | 8 | HTTP adapter, implement responses with proxy integration | 12, 13 | Done |
 | 9 | Compare the two architectures | 14 | Done |
-| 10 | AI assisted development reflection and criticism of agent decisions | 15, 16 | Pending |
+| 10 | AI assisted development reflection and criticism of agent decisions | 15, 16 | Done |
 | 11 | Final challenge: DELETE /orders/{id} (prediction then implementation) | 17 | Pending |
 | 12 | Final API review and architecture diagram | 18, 19 | Pending |
 | 13 | Deliverables and demonstration video | 20, 21 | Pending |
@@ -1149,3 +1149,206 @@ Architecture A remains the better answer in two specific situations: when the in
 pass through to something that is not even a Lambda, such as a DynamoDB or SQS integration with no
 code at all, and when the operating team must be able to change the HTTP surface without a code
 deployment. Neither applies to this API.
+
+## 10. AI-Assisted Development, and a Critique of It
+
+### 10.1 How the assistant was used
+
+The workshop was built with an AI coding assistant, section by section, under three rules.
+
+**The architecture was decided before any code was written.** Each section started with the design
+question, not with a request for an implementation: what the integration contract between API
+Gateway and Lambda should be, where validation belongs, what an error document contains. Code came
+after that was settled.
+
+**Claims were verified, not accepted.** This turned out to matter more than anything else. When the
+assistant explained how the Lambda Java runtime converts JSON into objects, the explanation was
+checked against the configuration of `JacksonFactory` in the `aws-lambda-java-libs` source and then
+against the deployed function with nine invocations. One of the predictions was wrong: a payload
+with unquoted field names was expected to be accepted, because the runtime parser is lenient, and
+it was rejected by the Lambda service before reaching the function. That correction is in section
+4.5, and it is the clearest reason not to take an explanation on trust.
+
+**The commits were made by hand, one per section**, after reading the change. The assistant
+proposed commit messages but never ran git.
+
+What the assistant was genuinely good at: writing the boilerplate of the CLI scripts, remembering
+that `pathParameters` can be `null`, and finding the exact AWS behavior when asked for a source.
+What it was not good at: knowing when a pattern it proposed would collide with how the Lambda
+runtime works, which is the subject of the next section.
+
+### 10.2 Six decisions examined
+
+#### Decision 1. One Lambda function per operation in architecture A, one for everything in B
+
+**What it proposed.** Three functions, `orders-create-order`, `orders-get-order` and
+`orders-find-orders-by-customer`, for the custom integration, and a single `orders-api-proxy` for
+the proxy integration.
+
+**Why it probably proposed it.** Each mapping template produces a different document, so a
+different input type per function follows naturally, and the one function per operation shape is
+the textbook presentation of a custom integration. For the proxy integration a single function is
+equally conventional, since the event already carries the route.
+
+**Do I agree?** For architecture A, yes, and it also made the comparison honest, because it is what
+that style of integration naturally leads to. For a real system, no: three functions multiply
+deployments, permissions and cold starts for three methods on one resource.
+
+**Alternative.** One function for architecture A as well, with the mapping template adding a field
+such as `{"operation": "getOrder", "id": "..."}`. That keeps one deployment package but moves
+routing into a string invented in a VTL template, with no compiler and no test protecting it. It is
+the worst of both worlds: the dispatch of architecture B without its type safety.
+
+**What was implemented and why.** Three functions in A, one in B. The split made a limitation
+visible that would otherwise have stayed hidden: an order created through `POST` is invisible to
+`GET`, because each function has its own memory. That is documented with the actual responses in
+`docs/architecture-a-http-tests.md`, and it is a better argument for a real database than any
+explanation.
+
+#### Decision 2. `CreateOrderRequest` as a mutable JavaBean instead of a Java 17 `record`
+
+**What it proposed.** A class with a public no-argument constructor, getters and setters, in a
+project that targets Java 17 and where a `record` would be the idiomatic choice.
+
+**Why it probably proposed it.** Because the Lambda runtime builds the input object with the
+no-argument constructor and then populates it, and a record cannot be built that way.
+
+**Do I agree?** Yes, but only because the reason was verified instead of asserted. The claim was
+checked in the `JacksonFactory` source, where `AUTO_DETECT_CREATORS` is disabled, and then on the
+deployed function. Without that evidence it would have been an arbitrary restriction on the model.
+
+**Alternative.** Keep `record` types in the application and add a separate DTO in the AWS layer, or
+register a `CustomPojoSerializer` through `META-INF/services` so that records can be deserialized.
+The first adds a class and a mapping per operation, the second adds a dependency and a service file
+to make the language feature work.
+
+**What was implemented and why.** JavaBeans, with the reason written in the class comment so the
+next reader does not "fix" it into a record. This is the one place where infrastructure visibly
+shaped a model class, and section 3 admits it rather than hiding it.
+
+#### Decision 3. Putting the error code inside the exception message
+
+**What it proposed.** `FunctionErrorException`, whose message is the full error document
+`{"error":"ORDER_NOT_FOUND","message":"..."}`, so that an API Gateway selection pattern can match
+`.*ORDER_NOT_FOUND.*` and the integration response can forward it with
+`$input.path('$.errorMessage')`.
+
+**Why it probably proposed it.** Because API Gateway matches selection patterns against
+`errorMessage` and against nothing else, so there is no structured field to route on. Encoding the
+document in the message is the only way to get both the status code and the error body right.
+
+**Do I agree?** Reluctantly. It works and it is well confined, but a JSON document inside an
+exception message is not something anyone would write if the infrastructure did not demand it. It
+is the clearest case in the project of configuration dictating the shape of code.
+
+**Alternative.** Let the raw Lambda error reach the client and map only the status code, which
+leaks `errorType` and the full stack trace, or build the error body in VTL by taking the message
+apart inside the response template, which moves string parsing into an untestable place.
+
+**What was implemented and why.** The proposal, with one change: the translation lives in the AWS
+layer only. `OrderService` keeps throwing `OrderNotFoundException` with the plain message "Order
+ORD-999 does not exist", and architecture B never uses `FunctionErrorException` at all, since it
+maps exceptions to status codes directly. The contamination is real but it stops at the boundary.
+
+#### Decision 4. Hiding storage and id generation behind interfaces
+
+**What it proposed.** `OrderRepository` with an in-memory implementation, and `OrderIdGenerator`
+with a sequential implementation, for a workshop that explicitly does not require a database.
+
+**Why it probably proposed it.** It is the standard ports and adapters answer, and it is the kind
+of structure that reads as "good design" by default.
+
+**Do I agree?** Partly, and this is the decision I pushed back on hardest. Two interfaces with one
+implementation each, for an application that stores three orders in a map, is the definition of
+speculative generality. The question is whether each one earns its place.
+
+`OrderIdGenerator` does, for a concrete reason: it makes the service deterministic under test. The
+tests assert `ORD-001` exactly, and `ignoresAnyIdTheClientMightTryToChoose` injects `() -> "ORD-999"`
+as a one-line lambda. Without the interface those tests would have to accept any id.
+
+`OrderRepository` is weaker. Nothing in this project has a second implementation, and the tests
+could use the concrete class. What it does buy is precise: the in-memory store is the one part of
+this system that is known to be wrong, section 4.6 proves it with a cold start, and the interface
+is where the fix will go.
+
+**Alternative.** A `Map` field inside `OrderService` and a `UUID` for ids. Fewer classes, and the
+same behavior for everything the workshop asks for.
+
+**What was implemented and why.** Both interfaces were kept, the id generator because it is paid
+for by the tests, the repository because the limitation it abstracts is documented and measured
+rather than hypothetical. If neither had been true, the `Map` would have been the better answer.
+
+#### Decision 5. Holding the service in a `static` field, which was wrong
+
+**What it proposed.** `private static final OrderService SERVICE = OrderService.withDefaults();` in
+every handler, so the instance is created once per execution environment and reused by warm
+invocations.
+
+**Why it probably proposed it.** It is correct and standard advice for Lambda: initialization
+outside the handler method runs once per container instead of once per request.
+
+**Do I agree?** It is right about Lambda and wrong about everything else, and the tests proved it.
+When the proxy adapter grew a test that creates an order, an unrelated test that counts the orders
+of a customer started failing: the static service carried state from one test into the next. The
+suite caught a defect that no amount of reading would have.
+
+**Alternative.** Keep the static field and make the tests tolerant, asserting "contains ORD-001"
+instead of "has exactly two orders". That hides the problem and makes the tests weaker.
+
+**What was implemented and why.** Constructor injection with the static instance as the default:
+
+```java
+private static final OrderService SHARED_SERVICE = OrderService.withDefaults();
+
+public OrdersApiProxyHandler() {        // the constructor the runtime calls
+    this(SHARED_SERVICE);
+}
+
+OrdersApiProxyHandler(OrderService service) {   // the one the tests call
+    this.service = service;
+}
+```
+
+Lambda still gets its warm reuse and the tests get isolation. The three handlers of architecture A
+still carry the original version, and the honest reason is that they are never exercised deeply
+enough for it to hurt.
+
+A second proposal in the same area was rejected outright: pulling the repeated `try/catch` of those
+three handlers into an abstract `OrderFunction<I, O>` base class. It is the obvious way to remove
+duplication and it would have broken the deployment, because the runtime discovers the input type
+from the type arguments of `RequestHandler`, and a subclass that declares no `handleRequest` of its
+own leaves only the erased `handleRequest(Object, Context)` visible, so payloads would arrive as a
+`Map`. The duplication was kept deliberately.
+
+#### Decision 6. Preloading sample orders
+
+**What it proposed.** `InMemoryOrderRepository.withSampleData()`, seeding `ORD-001`, `ORD-002` and
+`ORD-003` so that a freshly started function can answer a `GET` before any `POST` has happened.
+
+**Why it probably proposed it.** Without it, every demonstration of `GET /orders/{id}` on a cold
+function returns `404`, which looks like a broken API.
+
+**Do I agree?** Yes for the workshop, with a warning attached. Seed data makes the API demonstrable,
+but it also papers over exactly the limitation the workshop warns about: it makes an ephemeral,
+unshared store look like it is working.
+
+**Alternative.** No seed data, and accept that a demonstration has to `POST` before it can `GET`.
+Honest, and it would still fail in architecture A, where the two operations are different
+functions with separate memory.
+
+**What was implemented and why.** The seed data was kept, and the limitation it hides is
+demonstrated explicitly instead: section 4.6 forces a cold start and shows the id counter restart,
+and `docs/architecture-a-http-tests.md` shows a `POST` returning `ORD-100` followed by a `GET` on
+`ORD-100` answering `404`. The convenience is kept, the illusion is not.
+
+### 10.3 What this says about using an assistant
+
+Four of these six decisions were accepted, one was accepted with the reasoning rewritten, and one
+was wrong in a way that only a test could reveal. The pattern is consistent: the proposals were
+reasonable defaults, and every time one of them failed it was because it collided with something
+specific about this environment, the type discovery of the Lambda runtime, the matching rules of
+`selectionPattern`, the lifetime of a static field across tests.
+
+That is the useful summary. An assistant produces competent defaults quickly, and the defaults are
+correct until the environment has an opinion. The work that cannot be delegated is knowing where
+those opinions are and checking.
