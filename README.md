@@ -20,7 +20,47 @@ built with Java 17, deployed with AWS Lambda and exposed through Amazon API Gate
 | 10 | AI assisted development reflection and criticism of agent decisions | 15, 16 | Done |
 | 11 | Final challenge: DELETE /orders/{id} (prediction then implementation) | 17 | Done |
 | 12 | Final API review and architecture diagram | 18, 19 | Done |
-| 13 | Deliverables and demonstration video | 20, 21 | Pending |
+| 13 | Deliverables and demonstration video | 20, 21 | Done |
+
+## Quick start
+
+```bash
+mvn test        # 82 tests, no AWS credentials and no network needed
+mvn package     # target/orders-api-1.0-SNAPSHOT.jar, the deployment package
+
+bash infrastructure/architecture-b/create-api.sh   # deploys the final API, prints its base URL
+```
+
+```bash
+BASE=https://<api-id>.execute-api.us-east-1.amazonaws.com/dev
+
+curl -i $BASE/orders/ORD-001
+curl -i -X POST $BASE/orders -H "Content-Type: application/json" \
+  -d '{"customerId":"CUST-42","product":"MacBook Air","quantity":1}'
+curl -i "$BASE/orders?customerId=CUST-42"
+curl -i -X DELETE $BASE/orders/ORD-001
+```
+
+Full instructions, including the comparison architecture, are in
+[section 13](#13-deliverables).
+
+## Contents
+
+| Section | What it answers |
+|---|---|
+| [1. API Design](#1-api-design) | the contract: resources, URLs, status codes, error format, and the design questions |
+| [2. Plain Java Implementation](#2-plain-java-implementation) | the application, with no HTTP and no AWS anywhere in it |
+| [3. Local Tests and Checkpoint 1](#3-local-tests-and-checkpoint-1) | the test suite, `mvn test`, `mvn package`, and what the JAR contains |
+| [4. Deploying a Java Function to AWS Lambda](#4-deploying-a-java-function-to-aws-lambda) | how the runtime turns JSON into Java objects, investigated and verified |
+| [5. Designing the HTTP Interface](#5-designing-the-http-interface) | how API Gateway extracts `{id}`, and the integration contract |
+| [6. Architecture A](#6-architecture-a-api-gateway-mapping-and-http-semantics) | mapping templates, selection patterns, HTTP semantics, Checkpoint 3 |
+| [7. The Proxy Integration Event](#7-the-lambda-proxy-integration-event) | the real event captured from AWS, field by field |
+| [8. Architecture B](#8-architecture-b-the-http-adapter) | the HTTP adapter, tested locally against those real events |
+| [9. Comparing the Two Architectures](#9-comparing-the-two-architectures) | the eight questions, answered with measurements |
+| [10. Critique of the AI Assistant](#10-ai-assisted-development-and-a-critique-of-it) | six decisions examined, including one that was wrong |
+| [11. Final Challenge, DELETE](#11-final-challenge-delete-ordersid) | the prediction, then the implementation, then the comparison |
+| [12. The Final API](#12-the-final-api-and-its-architecture) | every status code verified, and the architecture diagram |
+| [13. Deliverables](#13-deliverables) | where everything is, and how to build, test and deploy it |
 
 ## 1. API Design
 
@@ -1740,3 +1780,124 @@ bash infrastructure/architecture-a/add-delete.sh    # DELETE for architecture A,
 Prerequisites: Java 17 or newer, Maven 3.9, an AWS CLI with credentials, and an execution role for
 Lambda. The scripts read the account from `aws sts get-caller-identity` and expect a role named
 `LabRole`, which is what AWS Academy provides; on another account, change that one line.
+
+## 13. Deliverables
+
+### 13.1 Where each required deliverable is
+
+| Required | Where |
+|---|---|
+| Complete Java source code | [`src/main/java/com/escuelaing/orders/`](src/main/java/com/escuelaing/orders/) |
+| Maven configuration | [`pom.xml`](pom.xml) |
+| Unit tests | [`src/test/java/com/escuelaing/orders/`](src/test/java/com/escuelaing/orders/), 82 tests |
+| Lambda handlers | [`lambda/`](src/main/java/com/escuelaing/orders/lambda/) for architecture A, [`lambda/proxy/`](src/main/java/com/escuelaing/orders/lambda/proxy/) for architecture B |
+| API Gateway configuration | [`infrastructure/`](infrastructure/): scripts that recreate both APIs from zero, plus the mapping templates as files |
+| Example requests and responses | [`docs/architecture-a-http-tests.md`](docs/architecture-a-http-tests.md), [`docs/architecture-b-http-tests.md`](docs/architecture-b-http-tests.md), [`docs/lambda-invocations/`](docs/lambda-invocations/) |
+| Example proxy event | [`docs/proxy-events/`](docs/proxy-events/), five real events captured from AWS |
+| Architecture diagram | section 12.3, with intermediate diagrams in sections 4.7, 5 and 8 |
+| Answers to the architectural questions | sections 1.4, 3.3 (Checkpoint 1), 4.5 (Checkpoint 2), 6.5 (Checkpoint 3), 9 |
+| Analysis of the AI assistant's decisions | section 10 |
+| Build and test instructions | section 13.3 |
+
+### 13.2 Repository layout
+
+```
+TDSE_Serverless_RestAPI_AWSLambda/
+├── pom.xml
+├── README.md
+├── src/
+│   ├── main/java/com/escuelaing/orders/
+│   │   ├── model/         Order, CreateOrderRequest, GetOrderRequest,
+│   │   │                  FindOrdersByCustomerRequest, DeleteOrderRequest
+│   │   ├── exception/     OrderException, OrderNotFoundException, InvalidOrderException
+│   │   ├── repository/    OrderRepository, InMemoryOrderRepository
+│   │   ├── service/       OrderService, OrderIdGenerator, SequentialOrderIdGenerator
+│   │   └── lambda/        architecture A: one handler per operation,
+│   │       │              FunctionErrorException, JsonText, EventEchoHandler
+│   │       └── proxy/     architecture B: OrdersApiProxyHandler, HttpResponses
+│   └── test/java/com/escuelaing/orders/
+├── infrastructure/
+│   ├── architecture-a/    create-api.sh, add-delete.sh, mapping-templates/
+│   ├── architecture-b/    create-api.sh
+│   └── capture-proxy-event.sh
+└── docs/
+    ├── architecture-a-http-tests.md    requests and responses, architecture A
+    ├── architecture-b-http-tests.md    requests and responses, architecture B
+    ├── lambda-invocations/             payloads used to invoke Lambda directly, plus RESULTS.md
+    ├── proxy-events/                   real API Gateway proxy events
+    └── screenshots/                    the AWS console
+```
+
+### 13.3 Building, testing and deploying
+
+**Prerequisites.** Java 17 or newer (the project compiles with `release 17`, so a newer JDK is
+fine), Maven 3.9, and for the deployment an AWS CLI with valid credentials and a Lambda execution
+role. The scripts read the account with `aws sts get-caller-identity` and expect a role named
+`LabRole`, which is what AWS Academy provides; on another account, change that line.
+
+**Test and build.** Neither needs AWS, credentials or a network:
+
+```bash
+mvn test
+mvn package
+```
+
+`mvn package` produces two JARs, and the one to deploy is the shaded one:
+
+| File | Contents |
+|---|---|
+| `target/orders-api-1.0-SNAPSHOT.jar` | 3.3 MB, the project plus its dependencies, **this is the deployment package** |
+| `target/original-orders-api-1.0-SNAPSHOT.jar` | the project classes alone, not deployable |
+
+**Deploy the final API, architecture B:**
+
+```bash
+bash infrastructure/architecture-b/create-api.sh
+```
+
+It creates or updates the `orders-api-proxy` function, builds the REST API with `/orders` and
+`/orders/{id}` under an `ANY` method each, grants API Gateway permission to invoke the function,
+deploys the `dev` stage and prints the base URL.
+
+**Deploy the comparison architecture, A, which is optional:**
+
+```bash
+bash infrastructure/architecture-a/create-api.sh    # three functions, templates, selection patterns
+bash infrastructure/architecture-a/add-delete.sh    # a fourth function and ten more objects
+```
+
+**Publish a code change** without touching any API Gateway configuration:
+
+```bash
+mvn package
+aws lambda update-function-code --function-name orders-api-proxy \
+  --zip-file fileb://target/orders-api-1.0-SNAPSHOT.jar
+```
+
+**Capture the proxy event again**, which deploys a diagnostic function and removes it afterwards:
+
+```bash
+bash infrastructure/capture-proxy-event.sh
+```
+
+**Remove everything:**
+
+```bash
+aws apigateway delete-rest-api --rest-api-id <api-id>
+for f in orders-api-proxy orders-create-order orders-get-order \
+         orders-find-orders-by-customer orders-delete-order; do
+  aws lambda delete-function --function-name $f
+done
+```
+
+**Two things that cost time during the workshop, recorded so they do not cost it again.**
+
+A new deployment takes a moment to reach the stage, and until it does, a request to a brand new
+method answers `403 Missing Authentication Token`, which is the same answer API Gateway gives for
+a route that does not exist. `aws apigateway test-invoke-method` bypasses the stage and tells the
+two apart immediately.
+
+On Git Bash under Windows, arguments that look like POSIX paths are rewritten before the AWS CLI
+sees them, which turns `path=/responseTemplates/...` into `C:/Program Files/Git/responseTemplates/...`.
+Exporting `MSYS_NO_PATHCONV=1` stops it. Paths passed as `file://` must also be relative to the
+repository root, since the Windows AWS CLI cannot read a `/c/Users/...` path.
