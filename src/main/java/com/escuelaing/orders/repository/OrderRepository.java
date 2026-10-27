@@ -18,4 +18,12 @@ public interface OrderRepository {
     Optional<Order> findById(String id);
 
     List<Order> findByCustomerId(String customerId);
+
+    /**
+     * Removes the order with that id.
+     *
+     * @return whether an order was actually removed, so the caller can tell "deleted" from
+     *     "there was nothing to delete" without asking twice
+     */
+    boolean deleteById(String id);
 }

@@ -192,3 +192,44 @@ The new order is nowhere to be found. Architecture A uses one Lambda function pe
 `orders-get-order` runs in a different one. This is not a bug in the HTTP design, it is the
 consequence of combining an in-memory repository with several independent functions, and it is the
 clearest practical argument for a shared store.
+
+## Deleting an order, 204 No Content
+
+Added in section 17, at the cost of a fourth Lambda function and ten API Gateway objects. See
+[`infrastructure/architecture-a/add-delete.sh`](../infrastructure/architecture-a/add-delete.sh).
+
+```bash
+curl -i -X DELETE $BASE/orders/ORD-001
+```
+
+```
+HTTP/1.1 204 No Content
+```
+
+Zero bytes, even though the function returns `void` and the runtime therefore answers with the
+literal payload `null`. A direct invocation shows it:
+
+```bash
+aws lambda invoke --function-name orders-delete-order \
+  --cli-binary-format raw-in-base64-out --payload fileb://docs/lambda-invocations/d1-delete-order.json out.json
+cat out.json
+# null
+```
+
+API Gateway does not forward that body on a `204`. An empty response template was configured at
+first to prevent it and then removed after measuring that it changes nothing.
+
+## Deleting an order that does not exist, 404 Not Found
+
+```bash
+curl -i -X DELETE $BASE/orders/ORD-999
+```
+
+```
+HTTP/1.1 404 Not Found
+
+{"error":"ORDER_NOT_FOUND","message":"Order ORD-999 does not exist"}
+```
+
+The same selection pattern mechanism as the other operations: `.*ORDER_NOT_FOUND.*` on the
+integration response, and `$input.path('$.errorMessage')` to return the contracted document.

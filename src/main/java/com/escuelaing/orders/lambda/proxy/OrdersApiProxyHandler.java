@@ -106,6 +106,9 @@ public class OrdersApiProxyHandler
         if (ORDER_BY_ID.equals(resource) && "GET".equals(method)) {
             return getOrder(request);
         }
+        if (ORDER_BY_ID.equals(resource) && "DELETE".equals(method)) {
+            return deleteOrder(request);
+        }
 
         return HttpResponses.error(405, "METHOD_NOT_ALLOWED",
                 method + " is not supported on " + resource);
@@ -120,6 +123,16 @@ public class OrdersApiProxyHandler
     private APIGatewayProxyResponseEvent getOrder(APIGatewayProxyRequestEvent request) {
         Order found = service.getOrder(pathParameter(request, "id"));
         return HttpResponses.ok(found);
+    }
+
+    /**
+     * Answers {@code 204 No Content}: the deletion succeeded and there is nothing left to return.
+     * The application decides whether the order existed, by throwing or not throwing; choosing
+     * {@code 204} over {@code 200} is this layer's decision.
+     */
+    private APIGatewayProxyResponseEvent deleteOrder(APIGatewayProxyRequestEvent request) {
+        service.deleteOrder(pathParameter(request, "id"));
+        return HttpResponses.noContent();
     }
 
     private APIGatewayProxyResponseEvent findOrdersByCustomer(APIGatewayProxyRequestEvent request) {

@@ -175,6 +175,58 @@ class OrderServiceTest {
     }
 
     @Test
+    void deletesAnExistingOrderSoItCanNoLongerBeRetrieved() {
+        repository.save(new Order("ORD-42", "CUST-7", "Keyboard", 2));
+
+        service.deleteOrder("ORD-42");
+
+        assertThrows(OrderNotFoundException.class, () -> service.getOrder("ORD-42"));
+    }
+
+    @Test
+    void failsWithOrderNotFoundWhenDeletingAnOrderThatDoesNotExist() {
+        OrderNotFoundException error =
+                assertThrows(OrderNotFoundException.class, () -> service.deleteOrder("ORD-999"));
+
+        assertEquals("ORDER_NOT_FOUND", error.getErrorCode());
+        assertEquals("Order ORD-999 does not exist", error.getMessage());
+    }
+
+    @Test
+    void failsWithOrderNotFoundWhenDeletingTheSameOrderTwice() {
+        repository.save(new Order("ORD-42", "CUST-7", "Keyboard", 2));
+        service.deleteOrder("ORD-42");
+
+        assertThrows(OrderNotFoundException.class, () -> service.deleteOrder("ORD-42"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "   "})
+    void rejectsABlankIdOnDelete(String id) {
+        assertEquals("INVALID_ORDER",
+                assertThrows(InvalidOrderException.class, () -> service.deleteOrder(id))
+                        .getErrorCode());
+    }
+
+    @Test
+    void rejectsANullIdOnDelete() {
+        assertThrows(InvalidOrderException.class, () -> service.deleteOrder(null));
+    }
+
+    @Test
+    void leavesTheOtherOrdersUntouchedWhenOneIsDeleted() {
+        repository.save(new Order("ORD-001", "CUST-42", "MacBook Air", 1));
+        repository.save(new Order("ORD-002", "CUST-42", "Adapter", 3));
+        repository.save(new Order("ORD-003", "CUST-7", "Keyboard", 2));
+
+        service.deleteOrder("ORD-001");
+
+        assertEquals(List.of("ORD-002"), service.getOrdersByCustomer("CUST-42")
+                .stream().map(Order::getId).toList());
+        assertEquals(1, service.getOrdersByCustomer("CUST-7").size());
+    }
+
+    @Test
     void readsTheOrdersThatWerePreloadedInTheRepository() {
         OrderService seeded = OrderService.withDefaults();
 

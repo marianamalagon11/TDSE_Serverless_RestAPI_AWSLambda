@@ -161,3 +161,56 @@ HTTP/1.1 405 Method Not Allowed
 Architecture A answered `403 Missing Authentication Token` to the same request, because the method
 was simply not declared. The `ANY` method of architecture B sends everything to the function, which
 can give a correct and explainable answer. `DELETE` is implemented in section 11.
+
+## Deleting an order, 204 No Content
+
+```bash
+curl -i -X DELETE $BASE/orders/ORD-001
+```
+
+```
+HTTP/1.1 204 No Content
+```
+
+No body, zero bytes. The response carries no `Content-Type` either, since there is nothing to
+describe.
+
+```bash
+curl -i $BASE/orders/ORD-001
+```
+
+```
+HTTP/1.1 404 Not Found
+
+{"error":"ORDER_NOT_FOUND","message":"Order ORD-001 does not exist"}
+```
+
+```bash
+curl -i "$BASE/orders?customerId=CUST-42"
+```
+
+```
+HTTP/1.1 200 OK
+
+[{"id":"ORD-002","customerId":"CUST-42","product":"USB-C Adapter","quantity":3}]
+```
+
+The deleted order is gone from the search as well, since both read it from the same repository.
+
+## Deleting an order that does not exist, 404 Not Found
+
+```bash
+curl -i -X DELETE $BASE/orders/ORD-999
+```
+
+```
+HTTP/1.1 404 Not Found
+
+{"error":"ORDER_NOT_FOUND","message":"Order ORD-999 does not exist"}
+```
+
+Deleting twice gives the same answer: the second attempt finds nothing to delete and is reported
+exactly like any other missing order.
+
+**No API Gateway change was needed for any of this.** The resource already had an `ANY` method, so
+the only thing that changed was the code of the function.

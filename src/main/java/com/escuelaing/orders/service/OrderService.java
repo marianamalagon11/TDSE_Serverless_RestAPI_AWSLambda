@@ -71,6 +71,25 @@ public class OrderService {
         return repository.findByCustomerId(customerId.trim());
     }
 
+    /**
+     * Removes an order.
+     *
+     * <p>Deleting an order that is not there is reported as a failure rather than silently
+     * accepted: whether the order exists is a question about the domain, and answering it here is
+     * what lets the HTTP layer choose between 204 and 404 without asking the repository itself.
+     *
+     * @throws InvalidOrderException if no id was supplied
+     * @throws OrderNotFoundException if no order has that id
+     */
+    public void deleteOrder(String id) {
+        if (isBlank(id)) {
+            throw new InvalidOrderException("Field 'id' is required");
+        }
+        if (!repository.deleteById(id.trim())) {
+            throw new OrderNotFoundException(id.trim());
+        }
+    }
+
     private void validate(CreateOrderRequest request) {
         if (request == null) {
             throw new InvalidOrderException("A request body is required");

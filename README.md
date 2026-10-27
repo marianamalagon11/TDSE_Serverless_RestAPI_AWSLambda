@@ -18,7 +18,7 @@ built with Java 17, deployed with AWS Lambda and exposed through Amazon API Gate
 | 8 | HTTP adapter, implement responses with proxy integration | 12, 13 | Done |
 | 9 | Compare the two architectures | 14 | Done |
 | 10 | AI assisted development reflection and criticism of agent decisions | 15, 16 | Done |
-| 11 | Final challenge: DELETE /orders/{id} (prediction then implementation) | 17 | Prediction committed |
+| 11 | Final challenge: DELETE /orders/{id} (prediction then implementation) | 17 | Done |
 | 12 | Final API review and architecture diagram | 18, 19 | Pending |
 | 13 | Deliverables and demonstration video | 20, 21 | Pending |
 
@@ -1458,3 +1458,126 @@ serialize the result as `null` and API Gateway would hand the client the literal
 body of a `204`, unless the integration response is given an empty template. Architecture A would
 need an extra piece of configuration that architecture B does not, which, if true, is one more
 measurement for section 9.
+
+### 11.2 What was implemented
+
+`DELETE /orders/{id}` was implemented in **both** architectures, so that the claim made in section
+9.5, that the operation costs nothing in B and a lot in A, could be measured instead of argued.
+
+**The application**, shared by both:
+
+```java
+public void deleteOrder(String id) {
+    if (isBlank(id)) {
+        throw new InvalidOrderException("Field 'id' is required");
+    }
+    if (!repository.deleteById(id.trim())) {
+        throw new OrderNotFoundException(id.trim());
+    }
+}
+```
+
+The repository answers a factual question, whether anything was removed. The service turns that
+into the domain statement that deleting an absent order is a failure. Neither mentions `204` or
+`404`.
+
+**Architecture B**, one branch and one method in the adapter:
+
+```java
+if (ORDER_BY_ID.equals(resource) && "DELETE".equals(method)) {
+    return deleteOrder(request);
+}
+
+private APIGatewayProxyResponseEvent deleteOrder(APIGatewayProxyRequestEvent request) {
+    service.deleteOrder(pathParameter(request, "id"));
+    return HttpResponses.noContent();
+}
+```
+
+The `catch` blocks were not touched: `OrderNotFoundException` was already mapped to `404`.
+
+**Architecture A**, a fourth function and seven steps of configuration, in
+[`infrastructure/architecture-a/add-delete.sh`](infrastructure/architecture-a/add-delete.sh):
+the function, the `DELETE` method, the integration and its request template, four method responses,
+four integration responses, a Lambda permission and a new deployment.
+
+**Observed, against the deployed APIs:**
+
+```
+architecture A                                architecture B
+DELETE /orders/ORD-001   204, empty body      DELETE /orders/ORD-001   204, empty body
+DELETE /orders/ORD-001   404                  GET    /orders/ORD-001   404
+DELETE /orders/ORD-999   404                  GET    /orders?customerId=CUST-42   200, one order left
+```
+
+### 11.3 Prediction against reality
+
+| Prediction | Result |
+|---|---|
+| 4 files change in the application and the adapter | correct: `OrderRepository`, `InMemoryOrderRepository`, `OrderService`, `OrdersApiProxyHandler` |
+| `HttpResponses` does not need to change | correct, `noContent()` was already there |
+| No new class in the application for architecture B | correct |
+| No new Lambda for B, a fourth one for A | correct |
+| **No API Gateway change at all for B** | **correct**, the deployed API answered `DELETE` with no AWS change whatsoever |
+| About a dozen CLI calls for A | correct: 1 function, 1 method, 1 integration, 4 method responses, 4 integration responses, 1 permission, 1 deployment, 13 in total |
+| Deletion split between repository and service | correct |
+| The application decides existence, the adapter decides the status code | correct |
+| The `catch` blocks do not change, only the routing branch | correct |
+| 9 tests added, 1 existing test must change | partly correct, see below |
+| Risk 1: the `204` might carry the text `null` | **wrong**, and interesting |
+| Risk 2: architecture A would need an empty response template | **wrong**, for the same reason |
+
+**Where the prediction was wrong, and what it taught.**
+
+Both risks were the same mistake. The function of architecture A returns `void`, and a direct
+invocation confirms the runtime answers with the four characters `null`:
+
+```bash
+aws lambda invoke --function-name orders-delete-order --payload '{"id":"ORD-001"}' out.json
+# out.json contains exactly: null
+```
+
+So the premise was right. The conclusion was not: API Gateway returned **zero bytes** to the
+client, both with the empty response template and after it was removed and the API redeployed. A
+`204 No Content` is not allowed to carry a body, and API Gateway enforces that rather than passing
+the payload through. The empty template was configuration written to solve a problem that does not
+exist, and it was deleted from the script after being measured. What was not tested is whether the
+same payload would be forwarded under a status code that does allow a body, so the finding is
+stated narrowly: with `204`, the body is dropped.
+
+**Two smaller inaccuracies, recorded rather than quietly fixed.**
+
+The prediction said "no new class in the application". That was true of architecture B and false of
+A, which needed `DeleteOrderRequest` as well as `DeleteOrderHandler`, because in a custom
+integration every operation publishes its own input document. The prediction had been written
+thinking about B.
+
+The count was 9 tests added and 1 changed; the implementation added 15 and replaced 1. The extra
+ones came from writing them: that deleting twice fails the second time, that a deleted order
+disappears from the search by customer, that other orders are untouched. None of them were
+foreseen, and all of them are worth having.
+
+**One confirmation that was not in the prediction at all.** The first requests to the new `DELETE`
+of architecture A answered `403 Missing Authentication Token` even though the method, the
+integration, the four responses and the deployment all existed and were correct. The same request
+succeeded minutes later with no change. `test-invoke-method`, which bypasses the stage, answered
+`204` immediately, which is what located the problem: the deployment had not yet propagated to the
+stage. It is worth recording because `403 Missing Authentication Token` is the same answer API
+Gateway gives for a route that does not exist, so the obvious diagnosis is to go looking for a
+configuration mistake that is not there.
+
+### 11.4 What this measured about the two architectures
+
+| | Architecture A | Architecture B |
+|---|---|---|
+| Java classes added | 2 | 0 |
+| Java files changed | 3 | 4 |
+| New Lambda functions | 1 | 0 |
+| API Gateway objects created | 10 | 0 |
+| CLI calls | 13 | 0 |
+| New deployment required | yes | no |
+| Could the change be tested before deploying | the handler yes, the HTTP behavior no | entirely, 3 new adapter tests |
+
+This is the concrete version of the question "what happens when the API grows from 3 operations to
+30". The fourth operation cost nothing in API Gateway under architecture B and thirteen calls under
+architecture A, and that gap repeats for every operation after it.

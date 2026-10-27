@@ -54,4 +54,9 @@ public class InMemoryOrderRepository implements OrderRepository {
         matches.sort((left, right) -> left.getId().compareTo(right.getId()));
         return matches;
     }
+
+    @Override
+    public boolean deleteById(String id) {
+        return ordersById.remove(id) != null;
+    }
 }

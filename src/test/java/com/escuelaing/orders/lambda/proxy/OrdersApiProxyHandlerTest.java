@@ -168,10 +168,45 @@ class OrdersApiProxyHandlerTest {
     }
 
     @Test
-    void answers405ForAMethodThatIsNotImplementedYet() throws IOException {
-        // DELETE arrives at a known resource but has no operation yet, see section 11.
+    void answers204WhenAnOrderIsDeleted() throws IOException {
+        APIGatewayProxyRequestEvent request = capturedEvent("delete-order.json");
+        request.setPathParameters(Map.of("id", "ORD-001"));
+
+        APIGatewayProxyResponseEvent response = handler.handleRequest(request, null);
+
+        assertEquals(204, response.getStatusCode());
+        assertNull(response.getBody());
+        assertTrue(response.getHeaders().isEmpty());
+    }
+
+    @Test
+    void theDeletedOrderIsGoneAfterwards() throws IOException {
+        APIGatewayProxyRequestEvent delete = capturedEvent("delete-order.json");
+        delete.setPathParameters(Map.of("id", "ORD-001"));
+        handler.handleRequest(delete, null);
+
+        APIGatewayProxyRequestEvent get = capturedEvent("get-order-by-id.json");
+        get.setPathParameters(Map.of("id", "ORD-001"));
+
+        assertEquals(404, handler.handleRequest(get, null).getStatusCode());
+    }
+
+    @Test
+    void answers404WhenDeletingAnOrderThatDoesNotExist() throws IOException {
+        // The captured event asks for ORD-42, which is not among the preloaded orders.
         APIGatewayProxyResponseEvent response =
                 handler.handleRequest(capturedEvent("delete-order.json"), null);
+
+        assertEquals(404, response.getStatusCode());
+        assertEquals("ORDER_NOT_FOUND", body(response).get("error").asText());
+    }
+
+    @Test
+    void answers405ForAMethodWithNoOperation() throws IOException {
+        APIGatewayProxyRequestEvent request = capturedEvent("post-order.json");
+        request.setHttpMethod("PUT");
+
+        APIGatewayProxyResponseEvent response = handler.handleRequest(request, null);
 
         assertEquals(405, response.getStatusCode());
         assertEquals("METHOD_NOT_ALLOWED", body(response).get("error").asText());

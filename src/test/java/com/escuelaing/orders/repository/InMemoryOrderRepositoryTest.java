@@ -1,6 +1,7 @@
 package com.escuelaing.orders.repository;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.escuelaing.orders.model.Order;
@@ -57,6 +58,30 @@ class InMemoryOrderRepositoryTest {
         repository.save(new Order("ORD-002", "CUST-42", "Adapter", 3));
 
         assertEquals(List.of("ORD-001", "ORD-002", "ORD-003"),
+                repository.findByCustomerId("CUST-42").stream().map(Order::getId).toList());
+    }
+
+    @Test
+    void deletesAnExistingOrderAndSaysSo() {
+        repository.save(new Order("ORD-001", "CUST-42", "MacBook Air", 1));
+
+        assertTrue(repository.deleteById("ORD-001"));
+        assertTrue(repository.findById("ORD-001").isEmpty());
+    }
+
+    @Test
+    void reportsThatNothingWasDeletedForAnUnknownId() {
+        assertFalse(repository.deleteById("ORD-999"));
+    }
+
+    @Test
+    void removesADeletedOrderFromTheOrdersOfItsCustomer() {
+        repository.save(new Order("ORD-001", "CUST-42", "MacBook Air", 1));
+        repository.save(new Order("ORD-002", "CUST-42", "Adapter", 3));
+
+        repository.deleteById("ORD-001");
+
+        assertEquals(List.of("ORD-002"),
                 repository.findByCustomerId("CUST-42").stream().map(Order::getId).toList());
     }
 
