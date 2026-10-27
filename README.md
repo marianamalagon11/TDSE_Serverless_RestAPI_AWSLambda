@@ -12,7 +12,7 @@ built with Java 17, deployed with AWS Lambda and exposed through Amazon API Gate
 | 2 | Plain Java implementation | 5 | Done |
 | 3 | Local JUnit tests, mvn test/package, Checkpoint 1 | 6 | Done |
 | 4 | Deploy a Java function to Lambda, JSON mapping investigation, Checkpoint 2 | 7 | Done |
-| 5 | Design the HTTP interface with API Gateway (GET /orders/{id}) | 8 | Pending |
+| 5 | Design the HTTP interface with API Gateway (GET /orders/{id}) | 8 | Done |
 | 6 | API Gateway mapping templates (non proxy), query params, POST, HTTP semantics, Checkpoint 3 | 9, 10 | Pending |
 | 7 | Lambda proxy integration investigation, save example event | 11 | Pending |
 | 8 | HTTP adapter, implement responses with proxy integration | 12, 13 | Pending |
@@ -445,3 +445,147 @@ boxes, which is why the green ones never mention it.
 Note what is still missing at this point: there is no URL, no HTTP method and no status code. The
 function is invoked directly by its name through the AWS API, not by a client over HTTP. Adding
 that is the work of sections 8 to 10.
+
+## 5. Designing the HTTP Interface
+
+The function of section 4 runs in AWS, but it is not a REST API: it has no URL, no method and no
+status code, and it can only be invoked through the AWS API by its name. Amazon API Gateway is what
+turns it into an endpoint.
+
+```mermaid
+flowchart LR
+    C["Client<br/>curl, Postman, browser"]
+    G["Amazon API Gateway<br/>GET /orders/{id}"]
+    L["AWS Lambda<br/>GetOrderHandler"]
+    A["OrderService<br/>plain Java"]
+
+    C -->|"HTTP request"| G
+    G -->|"JSON event"| L
+    L -->|"method call"| A
+    A -->|"Order"| L
+    L -->|"JSON"| G
+    G -->|"HTTP response"| C
+
+    classDef aws fill:#ff9900,stroke:#333,color:#000
+    classDef adapter fill:#4b9cd3,stroke:#333,color:#fff
+    classDef plain fill:#5cb85c,stroke:#333,color:#fff
+    class G aws
+    class L adapter
+    class A plain
+    class C plain
+```
+
+### 5.1 The question to answer first
+
+A client calls:
+
+```
+GET /orders/ORD-42
+```
+
+but the application only needs one string, `ORD-42`. The design question is therefore not "how do
+I parse an HTTP request in Java", it is **who extracts that value**. Two answers are possible, and
+the workshop asks for both, one in sections 9 and 10 and the other in sections 11 to 13.
+
+| | Architecture A, custom integration | Architecture B, proxy integration |
+|---|---|---|
+| Who reads the path | API Gateway | the Lambda handler |
+| What Lambda receives | a small document designed by me | the full API Gateway event |
+| Integration type | `AWS` | `AWS_PROXY` |
+| Java code that knows HTTP | none | one adapter class |
+
+Section 5 designs A, which is the one where the application stays furthest away from HTTP.
+
+### 5.2 How API Gateway extracts the path parameter
+
+In a custom (non-proxy) integration, API Gateway builds the Lambda event with a **mapping template**
+written in Velocity Template Language (VTL). The template runs on the integration request, for a
+given `Content-Type`, and whatever it prints becomes the invocation payload.
+
+The variables available inside a template are:
+
+| Expression | Returns |
+|---|---|
+| `$input.params('id')` | one parameter by name, searching path, then query string, then headers |
+| `$input.params().path.id` | the same value, naming the source explicitly |
+| `$input.params().querystring.customerId` | a query string parameter |
+| `$input.json('$')` | the whole request body as JSON |
+| `$input.path('$.field')` | one field of the body |
+| `$input.body` | the raw body as a string |
+| `$context.requestId`, `$context.httpMethod` | data about the request itself |
+| `$util.escapeJavaScript(...)` | escaping, which AWS recommends around body values because unescaped characters make API Gateway answer `400` |
+
+So the answer to "how does API Gateway extract `{id}`" is: the resource is declared as
+`/orders/{id}`, which makes `id` a path parameter, and the template reads it with
+`$input.params('id')`.
+
+### 5.3 The integration contract
+
+This is the document each function will receive, and it is a design decision, not something AWS
+imposes:
+
+| Operation | Mapping template | Lambda receives | Java input type |
+|---|---|---|---|
+| `GET /orders/{id}` | `{"id": "$input.params('id')"}` | `{"id":"ORD-42"}` | `GetOrderRequest` |
+| `GET /orders?customerId=X` | `{"customerId": "$input.params('customerId')"}` | `{"customerId":"CUST-42"}` | a request type of its own |
+| `POST /orders` | `$input.json('$')` | the body unchanged | `CreateOrderRequest` |
+
+Two things are deliberate here.
+
+**The input is a named object, not a bare string.** `GET /orders/{id}` could have been given the
+template `"$input.params('id')"`, producing the JSON string `"ORD-42"` and a handler declared as
+`RequestHandler<String, Order>`. An object was chosen instead because it can grow: adding a filter
+or a second parameter later becomes one more field, while a bare string would force a breaking
+change on both sides.
+
+**The POST template passes the body through untouched.** The client already sends exactly the JSON
+that `CreateOrderRequest` expects, so transforming it would only add a place for the two shapes to
+drift apart.
+
+### 5.4 What the Java side looks like
+
+```java
+public class GetOrderHandler implements RequestHandler<GetOrderRequest, Order> {
+
+    private static final OrderService SERVICE = OrderService.withDefaults();
+
+    @Override
+    public Order handleRequest(GetOrderRequest request, Context context) {
+        return SERVICE.getOrder(request == null ? null : request.getId());
+    }
+}
+```
+
+The application is untouched again: `OrderService.getOrder(String)` was already written in section
+2 and still receives a plain `String`. The new code is one handler and one request class, and
+neither mentions URLs, methods or headers.
+
+`GetOrderHandlerTest` covers the happy path, the missing order, and the case where a misconfigured
+mapping template sends `{"id": ""}` or nothing at all, which is the realistic failure mode of this
+architecture: a template bug arrives at the application as an empty field.
+
+### 5.5 What is still missing, and why it is not trivial
+
+Returning the right **status codes** is the part that section 10 has to solve, and the research for
+it produced two findings that shape the implementation:
+
+1. **In a custom integration, a Lambda error is returned to the client as `200 OK` by default.**
+   An exception does not become an error response by itself. Each status code has to be declared on
+   the method response and then mapped on the integration response.
+2. **The mapping is driven by a regex, `selectionPattern`, matched against `errorMessage` only.**
+   Not against `errorType`, and not against any structured field. Since the application reports
+   failures as `OrderNotFoundException` and `InvalidOrderException`, whose distinguishing data is
+   the error **code**, that code has to travel inside the message text for API Gateway to be able
+   to tell a `404` from a `400`.
+
+That second point is the first real tension of this architecture: a decision about API Gateway
+configuration reaches back into what a Java exception message must contain. Section 6 resolves it
+by putting that formatting in the handler layer, so the application keeps reporting plain business
+messages, and section 14 revisits it when comparing the two architectures.
+
+A third consequence is already visible in the design: architecture A uses **one Lambda function per
+operation**, each with its own execution environment and therefore its own in-memory data. An order
+created through `POST /orders` is stored in the container of `orders-create-order` and is invisible
+to `orders-get-order`. The preloaded sample orders (`ORD-001`, `ORD-002`, `ORD-003`) exist exactly
+so the `GET` endpoints have something to return, and this limitation is a property of the
+in-memory repository, not of the HTTP design.
