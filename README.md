@@ -1798,6 +1798,7 @@ Lambda. The scripts read the account from `aws sts get-caller-identity` and expe
 | Answers to the architectural questions | sections 1.4, 3.3 (Checkpoint 1), 4.5 (Checkpoint 2), 6.5 (Checkpoint 3), 9 |
 | Analysis of the AI assistant's decisions | section 10 |
 | Build and test instructions | section 13.3 |
+| Demonstration video | [`docs/videoLABTDSE.mp4`](docs/videoLABTDSE.mp4) |
 
 ### 13.2 Repository layout
 
@@ -1825,7 +1826,8 @@ TDSE_Serverless_RestAPI_AWSLambda/
     ├── architecture-b-http-tests.md    requests and responses, architecture B
     ├── lambda-invocations/             payloads used to invoke Lambda directly, plus RESULTS.md
     ├── proxy-events/                   real API Gateway proxy events
-    └── screenshots/                    the AWS console
+    ├── screenshots/                    the AWS console
+    └── videoLABTDSE.mp4                the demonstration video
 ```
 
 ### 13.3 Building, testing and deploying
@@ -1901,3 +1903,18 @@ On Git Bash under Windows, arguments that look like POSIX paths are rewritten be
 sees them, which turns `path=/responseTemplates/...` into `C:/Program Files/Git/responseTemplates/...`.
 Exporting `MSYS_NO_PATHCONV=1` stops it. Paths passed as `file://` must also be relative to the
 repository root, since the Windows AWS CLI cannot read a `/c/Users/...` path.
+
+### 13.4 Demonstration video
+
+[`docs/videoLABTDSE.mp4`](docs/videoLABTDSE.mp4)
+
+It shows, in this order:
+
+1. `mvn test`, the 82 tests passing locally with no AWS credentials and no network.
+2. `mvn package`, and the two JARs it produces.
+3. A Lambda invoked directly with `aws lambda invoke`, with no API Gateway in the path: JSON in,
+   JSON out, and no status code anywhere.
+4. The deployed API answering `201 Created` with a `Location` header, `200 OK` on both reads,
+   `404 Not Found`, `400 Bad Request`, and the `DELETE` extension returning `204 No Content` and
+   then `404` when repeated.
+5. The architecture diagram of section 12.3.

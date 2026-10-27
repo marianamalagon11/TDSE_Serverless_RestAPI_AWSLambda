@@ -33,3 +33,6 @@ target/
 
 # Deployment artifact, changes on every redeploy
 infrastructure/**/.api-id
+
+# Output of the demo lambda invocation
+out.json
