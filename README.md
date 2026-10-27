@@ -18,7 +18,7 @@ built with Java 17, deployed with AWS Lambda and exposed through Amazon API Gate
 | 8 | HTTP adapter, implement responses with proxy integration | 12, 13 | Done |
 | 9 | Compare the two architectures | 14 | Done |
 | 10 | AI assisted development reflection and criticism of agent decisions | 15, 16 | Done |
-| 11 | Final challenge: DELETE /orders/{id} (prediction then implementation) | 17 | Pending |
+| 11 | Final challenge: DELETE /orders/{id} (prediction then implementation) | 17 | Prediction committed |
 | 12 | Final API review and architecture diagram | 18, 19 | Pending |
 | 13 | Deliverables and demonstration video | 20, 21 | Pending |
 
@@ -1352,3 +1352,109 @@ specific about this environment, the type discovery of the Lambda runtime, the m
 That is the useful summary. An assistant produces competent defaults quickly, and the defaults are
 correct until the environment has an opinion. The work that cannot be delegated is knowing where
 those opinions are and checking.
+
+## 11. Final Challenge: DELETE /orders/{id}
+
+The operation to add:
+
+| Case | Request | Response |
+|---|---|---|
+| The order exists | `DELETE /orders/ORD-42` | `204 No Content`, no body |
+| The order does not exist | `DELETE /orders/ORD-999` | `404 Not Found`, the contracted error document |
+
+### 11.1 Prediction, written before implementing
+
+This section was written and committed **before** the change was made, as the workshop requires.
+Section 11.3 compares it with what actually happened and does not edit it afterwards.
+
+**Which Java classes should change?**
+
+| Class | Change | Why |
+|---|---|---|
+| `OrderRepository` | add `boolean deleteById(String id)` | the port has to be able to express removal |
+| `InMemoryOrderRepository` | implement it with `ordersById.remove(id) != null` | the boolean says whether anything was actually removed |
+| `OrderService` | add `void deleteOrder(String id)` | a new business operation |
+| `OrdersApiProxyHandler` | one more branch, `DELETE` on `/orders/{id}` | routing is the adapter's job |
+
+And one class that should **not** need changing: `HttpResponses` already has `noContent()`, written
+when the response helpers were created, so `204` is available without touching it. `Order`,
+`CreateOrderRequest` and the exceptions should not change either: `OrderNotFoundException` already
+exists and already carries the right error code.
+
+Prediction in numbers: 4 files changed, no file deleted, no new class in the application.
+
+**Do I need a new Lambda function?**
+
+For architecture B, no. One function serves the whole API and the new route is a branch inside it.
+
+For architecture A, yes: a fourth function, `orders-delete-order`, with its own handler class and
+its own request type, because every operation there has its own function and its own input
+document.
+
+**Does the API Gateway configuration need to change?**
+
+For architecture B, **not at all**, and this is the sharpest claim of the prediction. The resource
+`/orders/{id}` is already declared with an `ANY` method, so `DELETE` already reaches the function.
+It can be verified today: the current deployment answers `405 METHOD_NOT_ALLOWED` to a `DELETE`,
+which means the request is arriving at the adapter and being rejected by Java, not by AWS.
+
+For architecture A, yes, and substantially: a `DELETE` method on `/orders/{id}`, a request template,
+method responses for `204`, `400`, `404` and `500`, the matching integration responses with their
+selection patterns, a Lambda permission and a new deployment. Roughly a dozen CLI calls against
+zero.
+
+**Where should the deletion logic reside?**
+
+Split in two, exactly like the other operations. Removing the entry belongs to
+`InMemoryOrderRepository`, since it is the only class that knows how orders are stored. Deciding
+what deletion *means*, that the id must be present and that deleting something that does not exist
+is a failure, belongs to `OrderService`.
+
+**Where should the decision to return 204 or 404 reside?**
+
+Two different decisions that are easy to confuse.
+
+The decision **that the order does not exist** is the application's. `OrderService.deleteOrder`
+should throw `OrderNotFoundException`, the same exception `getOrder` already throws, rather than
+returning a boolean for someone else to interpret. Whether an order exists is a domain question,
+not an HTTP one.
+
+The decision **that this becomes a 404, and that success becomes a 204 rather than a 200**, is the
+adapter's. It goes in the `try/catch` of `OrdersApiProxyHandler`, which already maps
+`OrderNotFoundException` to `404`, so that half needs no change at all. Only the success side is
+new: `DELETE` answers `204` where `GET` answers `200`.
+
+Prediction: the `catch` blocks do not change, only the routing branch.
+
+**Which tests should be added?**
+
+| Level | Test |
+|---|---|
+| `InMemoryOrderRepositoryTest` | deleting an existing order returns `true` and removes it |
+| | deleting an unknown id returns `false` |
+| | a deleted order disappears from `findByCustomerId` |
+| `OrderServiceTest` | an existing order is deleted and can no longer be retrieved |
+| | deleting an unknown order throws `OrderNotFoundException` with code `ORDER_NOT_FOUND` |
+| | a blank or null id is rejected with `InvalidOrderException` |
+| | deleting one order leaves the others untouched |
+| `OrdersApiProxyHandlerTest` | `DELETE` on an existing order answers `204` with no body |
+| | `DELETE` on a missing order answers `404` with the contracted error document |
+
+And one existing test that must **change**: `answers405ForAMethodThatIsNotImplementedYet` feeds the
+captured `delete-order.json` event and expects `405`. Once the operation exists it should expect
+`404`, because that captured event asks for `ORD-42`, which is not among the preloaded orders.
+That test changing is itself the proof that the saved event is real input and not decoration.
+
+**What I expect to get wrong.**
+
+Two risks, written down so they can be checked honestly afterwards.
+
+First, `204 No Content` must have **no body at all**. `HttpResponses.noContent()` sets the body to
+`null` and the headers to an empty map, but whether API Gateway then returns a genuinely empty
+response, or the string `null`, has not been verified. This is the most likely surprise.
+
+Second, in architecture A a handler for this operation would return `void`, so the runtime would
+serialize the result as `null` and API Gateway would hand the client the literal text `null` as the
+body of a `204`, unless the integration response is given an empty template. Architecture A would
+need an extra piece of configuration that architecture B does not, which, if true, is one more
+measurement for section 9.
