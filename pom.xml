@@ -18,6 +18,8 @@
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <junit.version>5.10.2</junit.version>
     <aws.lambda.core.version>1.2.3</aws.lambda.core.version>
+    <aws.lambda.events.version>3.11.4</aws.lambda.events.version>
+    <jackson.version>2.17.1</jackson.version>
   </properties>
 
   <dependencies>
@@ -27,6 +29,20 @@
       <groupId>com.amazonaws</groupId>
       <artifactId>aws-lambda-java-core</artifactId>
       <version>${aws.lambda.core.version}</version>
+    </dependency>
+
+    <!-- Architecture B only: the typed API Gateway proxy event, and a JSON parser for the
+         request body, which API Gateway hands over as an unparsed string. -->
+    <dependency>
+      <groupId>com.amazonaws</groupId>
+      <artifactId>aws-lambda-java-events</artifactId>
+      <version>${aws.lambda.events.version}</version>
+    </dependency>
+
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+      <version>${jackson.version}</version>
     </dependency>
 
     <dependency>

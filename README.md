@@ -15,8 +15,8 @@ built with Java 17, deployed with AWS Lambda and exposed through Amazon API Gate
 | 5 | Design the HTTP interface with API Gateway (GET /orders/{id}) | 8 | Done |
 | 6 | API Gateway mapping templates (non proxy), query params, POST, HTTP semantics, Checkpoint 3 | 9, 10 | Done |
 | 7 | Lambda proxy integration investigation, save example event | 11 | Done |
-| 8 | HTTP adapter, implement responses with proxy integration | 12, 13 | Pending |
-| 9 | Compare the two architectures | 14 | Pending |
+| 8 | HTTP adapter, implement responses with proxy integration | 12, 13 | Done |
+| 9 | Compare the two architectures | 14 | Done |
 | 10 | AI assisted development reflection and criticism of agent decisions | 15, 16 | Pending |
 | 11 | Final challenge: DELETE /orders/{id} (prediction then implementation) | 17 | Pending |
 | 12 | Final API review and architecture diagram | 18, 19 | Pending |
@@ -609,6 +609,10 @@ which can recreate the API from zero, and every request and response observed is
 Three functions, one per operation, all built from the same JAR and differing only in the handler
 class configured in AWS.
 
+![Resources of orders-api-custom](docs/screenshots/architecture-a-resources.png)
+
+Each method is declared explicitly, and each one carries its own template and its own responses.
+
 ### 6.2 Results
 
 | Case | Status | Body |
@@ -832,3 +836,316 @@ object, so routing, validation, status codes and the response body can be decide
 compiles and that can be tested on a laptop.
 
 That is the trade the next section implements.
+
+## 8. Architecture B: the HTTP Adapter
+
+The same API, implemented a second time. API Gateway no longer transforms anything: it routes and
+forwards, and a single Lambda function answers every request.
+
+```mermaid
+flowchart LR
+    C["Client"]
+    G["API Gateway<br/>ANY /orders<br/>ANY /orders/{id}"]
+    H["OrdersApiProxyHandler<br/>routing, parameters, body,<br/>status codes, headers"]
+    R["HttpResponses<br/>200, 201, 400, 404, 405, 415, 500"]
+    A["OrderService<br/>orders, customers, quantities"]
+
+    C -->|"HTTP"| G -->|"proxy event"| H
+    H --> R
+    H -->|"Java objects"| A
+    A -->|"Order"| H
+    R -->|"proxy response"| G -->|"HTTP"| C
+
+    classDef aws fill:#ff9900,stroke:#333,color:#000
+    classDef adapter fill:#4b9cd3,stroke:#333,color:#fff
+    classDef plain fill:#5cb85c,stroke:#333,color:#fff
+    class G aws
+    class H,R adapter
+    class A,C plain
+```
+
+The blue layer is new. The green layer is the same code as section 2, unmodified:
+`OrderService`, `Order`, `CreateOrderRequest`, `OrderRepository`. It was not touched to make this
+work, which is the result the workshop asks for.
+
+### 8.1 The pieces
+
+| Class | Responsibility |
+|---|---|
+| [`OrdersApiProxyHandler`](src/main/java/com/escuelaing/orders/lambda/proxy/OrdersApiProxyHandler.java) | routing, parameter extraction, body parsing, mapping exceptions to status codes |
+| [`HttpResponses`](src/main/java/com/escuelaing/orders/lambda/proxy/HttpResponses.java) | building the responses: status code, `Content-Type`, `Location`, JSON body |
+
+![Resources of orders-api-proxy](docs/screenshots/architecture-b-resources.png)
+
+The same two resources as architecture A, but a single `ANY` method on each: API Gateway is no
+longer told which methods exist, so answering `DELETE` with a correct `405` is the job of the
+adapter.
+
+**Routing is done on `resource`, not on `path`.** `resource` is the route API Gateway already
+matched, `/orders/{id}`, while `path` is the concrete URL. Using `path` would mean parsing a string
+that has already been parsed. A test pins this down by setting `path` to nonsense and checking the
+request is still routed correctly.
+
+**Error mapping lives in one `try/catch`:**
+
+```java
+try {
+    return route(request);
+} catch (OrderNotFoundException notFound) {
+    return HttpResponses.error(404, notFound.getErrorCode(), notFound.getMessage());
+} catch (InvalidOrderException invalid) {
+    return HttpResponses.error(400, invalid.getErrorCode(), invalid.getMessage());
+} catch (MalformedBodyException malformed) {
+    return HttpResponses.error(400, "MALFORMED_JSON", malformed.getMessage());
+} catch (RuntimeException unexpected) {
+    return HttpResponses.error(500, "INTERNAL_ERROR", "The request could not be processed");
+}
+```
+
+Eleven lines replace the selection patterns, the method responses and the response templates of
+architecture A, for all three operations at once. The last `catch` is the answer to section 18:
+an unexpected failure is `500` with the contracted body, logged to CloudWatch and never shown to
+the client.
+
+**Null safety is a requirement, not a precaution.** The captured events of section 7 show that
+`pathParameters` and `queryStringParameters` arrive as `null` when the route has none, so the
+adapter reads them through helpers that check. There is a test for each case.
+
+### 8.2 What the adapter gained that architecture A could not express
+
+| | Architecture A | Architecture B |
+|---|---|---|
+| `Location` on `201` | not expressible, parameter mappings cannot concatenate | `Location: /dev/orders/ORD-100`, built from the request path |
+| Body that is not JSON | never reaches the function | `400 MALFORMED_JSON` in the contract format |
+| Wrong media type | `415`, with a body invented by API Gateway | `415` in the contract format |
+| `DELETE` with no operation | `403 Missing Authentication Token` | `405 METHOD_NOT_ALLOWED`, explained |
+
+### 8.3 Tested on a laptop, against real AWS events
+
+This is the practical difference. The 15 tests of
+[`OrdersApiProxyHandlerTest`](src/test/java/com/escuelaing/orders/lambda/proxy/OrdersApiProxyHandlerTest.java)
+cover routing, every status code, the `Location` header, the error format and the null cases, and
+they run in half a second with `mvn test`.
+
+They are not fed hand written events. They **deserialize the real events captured in section 7**
+from `docs/proxy-events/`:
+
+```java
+private static APIGatewayProxyRequestEvent capturedEvent(String name) throws IOException {
+    return JSON.readValue(Path.of("docs", "proxy-events", name).toFile(),
+            APIGatewayProxyRequestEvent.class);
+}
+```
+
+So a test that says `GET /orders/ORD-999` answers `404` is asserting against the document AWS
+actually sends. In architecture A the equivalent guarantee did not exist: a VTL template cannot be
+compiled or unit tested, and the only way to check it is to deploy.
+
+**A bug this caught, and what it says about the design.** The first version of the handler kept the
+`OrderService` in a `static` field, which is what Lambda wants so that a warm execution environment
+reuses it. The suite then started failing: an order created by one test was still there in the
+next one. The fix was to inject the service through a constructor and keep the static instance as
+the default the runtime uses:
+
+```java
+private static final OrderService SHARED_SERVICE = OrderService.withDefaults();
+
+public OrdersApiProxyHandler() {          // the constructor the runtime calls
+    this(SHARED_SERVICE);
+}
+
+OrdersApiProxyHandler(OrderService service) {   // the one the tests call
+    this.service = service;
+}
+```
+
+The same tension exists in the three functions of architecture A, where it stays invisible simply
+because those handlers are never exercised deeply enough to notice.
+
+### 8.4 What it cost
+
+**The deployment package went from 24 KB to 3.3 MB**, from 10 classes to 1626. The adapter needs
+`aws-lambda-java-events` for the typed event and `jackson-databind` to parse a body that arrives as
+a string, neither of which architecture A required, since the runtime did all the JSON work and
+API Gateway did the extraction. A bigger package means a slower cold start.
+
+**The HTTP contract is no longer declarative.** In architecture A the status codes could be read
+from the API Gateway configuration without opening any Java. Here they are only visible by reading
+the handler.
+
+**One function means one blast radius.** A bug in routing affects every operation, and all
+operations share the same memory, timeout and permissions, instead of being sized per operation.
+
+### 8.5 Deployment
+
+```bash
+mvn package
+bash infrastructure/architecture-b/create-api.sh
+```
+
+The script is 67 lines against 165 for architecture A, and most of the difference is exactly the
+configuration that moved into Java: no mapping template, no method response, no integration
+response, no selection pattern. Two resources, one `ANY` method each, one integration, one
+permission, one deployment.
+
+Every request and response observed against the deployed API is recorded in
+[`docs/architecture-b-http-tests.md`](docs/architecture-b-http-tests.md).
+
+## 9. Comparing the Two Architectures
+
+Both architectures are deployed and answer the same contract, so the comparison is made against
+two working systems rather than against expectations.
+
+![The two APIs deployed side by side](docs/screenshots/both-apis.png)
+
+| | A, custom integration | B, proxy integration |
+|---|---|---|
+| Lambda functions | 3, one per operation | 1 |
+| API Gateway resources | 2 | 2 |
+| Methods | 3, one per operation | 2, `ANY` |
+| Mapping templates | 3 request, 1 response reused 8 times | 0 |
+| Method responses | 10 | 0 |
+| Integration responses | 10 | 0 |
+| Selection patterns | 8 | 0 |
+| Deployment script | 165 lines | 67 lines |
+| Java specific to the architecture | 182 lines | 256 lines |
+| Extra dependencies | none | `aws-lambda-java-events`, `jackson-databind` |
+| Deployment package | 24 KB, 10 classes | 3.3 MB, 1626 classes |
+| Application code | 451 lines, identical | 451 lines, identical |
+
+### 9.1 Which approach required more API Gateway configuration?
+
+Architecture A, and not by a small margin. Exposing three operations needed 3 request templates,
+10 method responses, 10 integration responses and 8 selection patterns, none of which exists in
+architecture B. The script that builds it is 165 lines against 67, and the difference is almost
+entirely that configuration.
+
+The asymmetry is structural, not accidental. In A, every status code must be declared twice, on
+the method response and on the integration response, for every method that can produce it. In B,
+API Gateway is told only where the function is.
+
+### 9.2 Which approach required more Java infrastructure code?
+
+Architecture B: 256 lines across two classes against 182 lines across five. Measured as a share of
+the project it is closer than it sounds, but the real cost of B is not the lines, it is the two
+dependencies they drag in and what those do to the deployment package: **24 KB and 10 classes
+become 3.3 MB and 1626 classes**. A needed no JSON library because the runtime did the mapping and
+API Gateway did the extraction; B has to parse a body that arrives as a string and build a response
+object, and that is what `jackson-databind` is for.
+
+Architecture A is not free of infrastructure code either. `FunctionErrorException` exists only
+because `selectionPattern` matches the message of an exception, and the three handlers repeat the
+same `try/catch` because the obvious refactor into a base class would break the type discovery of
+the runtime. That is infrastructure code too, it is just smaller and stranger.
+
+### 9.3 Which was easier to test locally?
+
+Architecture B, decisively, and this is the difference that matters most in practice.
+
+Its 15 tests cover routing, all seven status codes, the `Location` header, the error format and the
+cases where API Gateway sends `null` instead of an empty map, and they run in half a second with
+`mvn test`. They are fed the **real events captured from AWS** in section 7, so they assert against
+the document API Gateway actually sends.
+
+In architecture A, the Java handlers are testable, but the HTTP behavior is not. A mapping template
+is a VTL string inside a CLI call: it does not compile, it has no type checking and it cannot be
+unit tested. The only way to find out whether `$input.params('id')` was spelled correctly, or
+whether `.*ORDER_NOT_FOUND.*` matches the message, is to deploy and send a request. Both mistakes
+are silent: a wrong parameter name arrives as an empty field, and a pattern that stops matching
+quietly turns a `404` into a `200`.
+
+### 9.4 Where are the HTTP status codes defined in each approach?
+
+| | Where |
+|---|---|
+| A, success | API Gateway, the integration response with no selection pattern, one per method |
+| A, errors | API Gateway, one selection pattern per code per method, matched against the error message built in `FunctionErrorException` |
+| B, all | `HttpResponses` and the `try/catch` of `OrdersApiProxyHandler`, in Java |
+
+In A the codes are data in the AWS configuration and can be read without opening the source, which
+is genuinely useful. In B they are code, which means they can be grepped, reviewed in a pull
+request, versioned with the logic they belong to, and tested.
+
+### 9.5 What happens if the API grows from 3 operations to 30?
+
+**Architecture A grows linearly in configuration.** Each operation adds a method, a request
+template and roughly three method responses and three integration responses, so thirty operations
+mean on the order of 240 configuration objects, each created by its own CLI call and none of them
+checked by a compiler. It also tends to mean more functions: with the one function per operation
+model used here, thirty operations are thirty deployment packages, thirty sets of permissions and
+thirty cold starts to worry about. At that scale the configuration stops being written by hand and
+moves to CloudFormation, SAM, CDK or Terraform, which solves the repetition but not the fact that
+the behavior still cannot be tested without deploying.
+
+**Architecture B grows linearly in code, which is cheaper.** Each operation adds a branch and a
+method in the adapter, and only a new URL shape adds API Gateway configuration. The real risk is
+different: the `if` chain that routes three operations becomes unreadable at thirty, so it would
+have to become a routing table keyed by method and resource, with one class per operation behind
+it, and the single function becomes a single point of failure whose cold start grows with the
+whole API. A reasonable compromise at that size is several proxy functions, one per resource
+family, each with its own adapter.
+
+Section 11 is a concrete measurement of this question rather than a prediction: adding `DELETE`
+costs nothing in API Gateway under `ANY`, and a new method, a template and several responses under
+architecture A.
+
+### 9.6 Which approach makes the Java business logic cleaner?
+
+**Neither. They are identical, and that is the result.** `OrderService`, `Order`,
+`CreateOrderRequest`, `OrderRepository` and the exceptions are the same 451 lines in both, written
+in section 2 and never modified since. Searching the application for `http`, `status`, `header` or
+`servlet` returns nothing under either architecture.
+
+That is the whole point of the workshop question. Keeping the business logic clean was not achieved
+by the choice of integration, it was achieved by deciding, before any of this existed, that the
+application would receive Java objects and report failures as exceptions. Both architectures then
+had to adapt to it.
+
+If anything, architecture A contaminates the application very slightly more. The error code travels
+inside the exception message because a regular expression needs to find it there, which is an API
+Gateway concern reaching into the shape of a message. It was confined to the AWS layer, but the
+reason it exists at all comes from the infrastructure.
+
+### 9.7 Which approach would be easier for another developer to understand?
+
+Architecture B. To understand what `GET /orders/ORD-42` does, a developer opens one file, follows a
+method call and reads a `try/catch`. They can set a breakpoint, run the tests and change something
+with the compiler checking them.
+
+To understand the same request in architecture A, they need the Java handler, the request template,
+the method responses, the integration responses and the selection patterns, which live in the AWS
+console or in a CLI script, and they need to know that `selectionPattern` matches `errorMessage`
+with a Java regex. That last piece is not discoverable: nothing in the code says it, and the
+`FunctionErrorException` class only makes sense once you know it.
+
+The counterargument is fair and worth stating: a developer who already knows API Gateway can read
+the whole HTTP contract of architecture A from the console, with no Java at all, and that is a real
+advantage for someone operating the API rather than changing it.
+
+### 9.8 Which approach would you choose for a larger system, and why?
+
+**Architecture B**, for a system expected to grow and to be maintained by a team, for four reasons
+in order of weight:
+
+1. **The behavior is testable.** 15 tests against real AWS events, running in half a second,
+   against zero possible tests for a mapping template. On a larger system this is the difference
+   between refactoring confidently and not refactoring.
+2. **The behavior is reviewable and versioned.** A change to a status code appears in a diff next
+   to the logic that caused it. In architecture A it is a CLI call or a click in a console, and the
+   repository shows nothing.
+3. **Mistakes are caught by the compiler** instead of by a regular expression that silently stops
+   matching.
+4. **The HTTP contract can be expressed completely.** The `Location` header, the error format for
+   a malformed body and a correct `405` were all expressible in B and partly or entirely out of
+   reach in A.
+
+With three conditions attached. The routing must become a table rather than an `if` chain before it
+reaches ten operations. The package size must be watched, because 3.3 MB of dependencies is a cold
+start cost that architecture A does not pay. And the adapter must stay an adapter: the moment
+business rules start appearing in `OrdersApiProxyHandler`, the separation this workshop is about is
+lost, and nothing in the proxy architecture prevents that from happening.
+
+Architecture A remains the better answer in two specific situations: when the integration is a thin
+pass through to something that is not even a Lambda, such as a DynamoDB or SQS integration with no
+code at all, and when the operating team must be able to change the HTTP surface without a code
+deployment. Neither applies to this API.
