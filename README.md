@@ -1004,7 +1004,7 @@ because those handlers are never exercised deeply enough to notice.
 
 ### 8.4 What it cost
 
-**The deployment package went from 24 KB to 3.3 MB**, from 10 classes to 1626. The adapter needs
+**The deployment package went from 24 KB to 3.3 MB**, from 10 classes to 1628. The adapter needs
 `aws-lambda-java-events` for the typed event and `jackson-databind` to parse a body that arrives as
 a string, neither of which architecture A required, since the runtime did all the JSON work and
 API Gateway did the extraction. A bigger package means a slower cold start.
@@ -1023,8 +1023,8 @@ mvn package
 bash infrastructure/architecture-b/create-api.sh
 ```
 
-The script is 67 lines against 165 for architecture A, and most of the difference is exactly the
-configuration that moved into Java: no mapping template, no method response, no integration
+The script is 67 lines against 246 for architecture A, counting the one that adds `DELETE`, and
+most of the difference is exactly the configuration that moved into Java: no mapping template, no method response, no integration
 response, no selection pattern. Two resources, one `ANY` method each, one integration, one
 permission, one deployment.
 
@@ -1047,18 +1047,18 @@ two working systems rather than against expectations.
 | Method responses | 10 | 0 |
 | Integration responses | 10 | 0 |
 | Selection patterns | 8 | 0 |
-| Deployment script | 165 lines | 67 lines |
-| Java specific to the architecture | 182 lines | 256 lines |
+| Deployment script | 246 lines | 67 lines |
+| Java specific to the architecture | 214 lines | 269 lines |
 | Extra dependencies | none | `aws-lambda-java-events`, `jackson-databind` |
-| Deployment package | 24 KB, 10 classes | 3.3 MB, 1626 classes |
+| Deployment package it requires | 24 KB, 10 classes | 3.3 MB, 1628 classes |
 | Application code | 517 lines, identical | 517 lines, identical |
 
 ### 9.1 Which approach required more API Gateway configuration?
 
 Architecture A, and not by a small margin. Exposing three operations needed 3 request templates,
 10 method responses, 10 integration responses and 8 selection patterns, none of which exists in
-architecture B. The script that builds it is 165 lines against 67, and the difference is almost
-entirely that configuration.
+architecture B. The scripts that build it are 246 lines against 67, and the difference is almost entirely that
+configuration.
 
 The asymmetry is structural, not accidental. In A, every status code must be declared twice, on
 the method response and on the integration response, for every method that can produce it. In B,
@@ -1066,10 +1066,12 @@ API Gateway is told only where the function is.
 
 ### 9.2 Which approach required more Java infrastructure code?
 
-Architecture B: 256 lines across two classes against 182 lines across five. Measured as a share of
+Architecture B: 269 lines across two classes against 214 lines across six. Measured as a share of
 the project it is closer than it sounds, but the real cost of B is not the lines, it is the two
 dependencies they drag in and what those do to the deployment package: **24 KB and 10 classes
-become 3.3 MB and 1626 classes**. A needed no JSON library because the runtime did the mapping and
+become 3.3 MB and 1628 classes**. That 24 KB is what architecture A needs, measured before the
+adapter and its dependencies entered the project; this repository now builds a single JAR for
+everything, so in practice both architectures are deployed from the same 3.3 MB package. A needed no JSON library because the runtime did the mapping and
 API Gateway did the extraction; B has to parse a body that arrives as a string and build a response
 object, and that is what `jackson-databind` is for.
 
