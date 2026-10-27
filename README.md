@@ -19,7 +19,7 @@ built with Java 17, deployed with AWS Lambda and exposed through Amazon API Gate
 | 9 | Compare the two architectures | 14 | Done |
 | 10 | AI assisted development reflection and criticism of agent decisions | 15, 16 | Done |
 | 11 | Final challenge: DELETE /orders/{id} (prediction then implementation) | 17 | Done |
-| 12 | Final API review and architecture diagram | 18, 19 | Pending |
+| 12 | Final API review and architecture diagram | 18, 19 | Done |
 | 13 | Deliverables and demonstration video | 20, 21 | Pending |
 
 ## 1. API Design
@@ -1011,7 +1011,7 @@ two working systems rather than against expectations.
 | Java specific to the architecture | 182 lines | 256 lines |
 | Extra dependencies | none | `aws-lambda-java-events`, `jackson-databind` |
 | Deployment package | 24 KB, 10 classes | 3.3 MB, 1626 classes |
-| Application code | 451 lines, identical | 451 lines, identical |
+| Application code | 517 lines, identical | 517 lines, identical |
 
 ### 9.1 Which approach required more API Gateway configuration?
 
@@ -1092,8 +1092,9 @@ architecture A.
 ### 9.6 Which approach makes the Java business logic cleaner?
 
 **Neither. They are identical, and that is the result.** `OrderService`, `Order`,
-`CreateOrderRequest`, `OrderRepository` and the exceptions are the same 451 lines in both, written
-in section 2 and never modified since. Searching the application for `http`, `status`, `header` or
+`CreateOrderRequest`, `OrderRepository` and the exceptions are the same code in both, written in
+section 2 and only ever modified to gain a new business operation, never to suit an integration
+style. Searching the application for `http`, `status`, `header` or
 `servlet` returns nothing under either architecture.
 
 That is the whole point of the workshop question. Keeping the business logic clean was not achieved
@@ -1581,3 +1582,161 @@ configuration mistake that is not there.
 This is the concrete version of the question "what happens when the API grows from 3 operations to
 30". The fourth operation cost nothing in API Gateway under architecture B and thirteen calls under
 architecture A, and that gap repeats for every operation after it.
+
+## 12. The Final API and its Architecture
+
+The delivered API is architecture B, the proxy integration. Architecture A remains deployed and
+documented, because the comparison is part of the work, but it is not the final system.
+
+### 12.1 Operations, verified against the deployed API
+
+Every line below was produced by a real request to
+`https://oyu0y3kva7.execute-api.us-east-1.amazonaws.com/dev`:
+
+| Request | Status | Response |
+|---|---|---|
+| `GET /orders/ORD-001` | `200` | `{"id":"ORD-001","customerId":"CUST-42","product":"MacBook Air","quantity":1}` |
+| `POST /orders` with a valid order | `201` | the created order, plus `Location: /dev/orders/ORD-100` |
+| `GET /orders?customerId=CUST-42` | `200` | the array of that customer's orders |
+| `GET /orders?customerId=CUST-100` | `200` | `[]` |
+| `DELETE /orders/ORD-002` | `204` | no body, zero bytes |
+| `POST /orders` with `quantity: 0` | `400` | `{"error":"INVALID_ORDER","message":"Field 'quantity' must be greater than zero"}` |
+| `GET /orders` with no `customerId` | `400` | `{"error":"INVALID_ORDER","message":"Query parameter 'customerId' is required"}` |
+| `POST /orders` with a body that is not JSON | `400` | `{"error":"MALFORMED_JSON",...}` |
+| `GET /orders/ORD-999` | `404` | `{"error":"ORDER_NOT_FOUND","message":"Order ORD-999 does not exist"}` |
+| `DELETE /orders/ORD-999` | `404` | the same document |
+| `PUT /orders/ORD-001` | `405` | `{"error":"METHOD_NOT_ALLOWED","message":"PUT is not supported on /orders/{id}"}` |
+| `POST /orders` as `x-www-form-urlencoded` | `415` | `{"error":"UNSUPPORTED_MEDIA_TYPE",...}` |
+| an unexpected failure inside the application | `500` | `{"error":"INTERNAL_ERROR","message":"The request could not be processed"}` |
+
+The five status codes the workshop requires, `200`, `201`, `204`, `400` and `404`, are all present,
+and three more were needed to keep the contract honest once the adapter could express them.
+
+### 12.2 What happens on an unexpected internal error
+
+**In architecture B, a `500` with the contracted body and nothing else.** The last `catch` of the
+adapter takes any `RuntimeException` the application did not anticipate, answers
+
+```json
+{"error": "INTERNAL_ERROR", "message": "The request could not be processed"}
+```
+
+and writes the real exception to CloudWatch through the Lambda context logger. The client learns
+that the request failed and learns nothing about why, which is deliberate: internal details are not
+part of an API.
+
+This is not an assumption. A test installs an application that throws
+`IllegalStateException("connection pool exhausted at ConnectionPool:412")` and asserts that the
+response is `500`, that the body is the contracted document, and that neither
+`connection pool` nor `ConnectionPool` appears anywhere in it.
+
+**In architecture A, the same case is a genuine hole.** The selection patterns can only answer what
+they were told to look for. A failure whose message matches none of `.*ORDER_NOT_FOUND.*`,
+`.*INVALID_ORDER.*` or `.*INTERNAL_ERROR.*` falls through to the default integration response,
+which is the successful one, so the client receives **`200 OK` with a Lambda error document inside
+it**.
+
+It is easy to produce. Sending a payload the runtime cannot map to the input type:
+
+```bash
+aws lambda invoke --function-name orders-get-order \
+  --payload '{"id":{"unexpected":"object"}}' out.json
+```
+
+```json
+{"errorMessage": "An error occurred during JSON parsing",
+ "errorType": "java.lang.RuntimeException"}
+```
+
+That message matches no pattern, and the handler never ran, so the `try/catch` that would have
+produced an `INTERNAL_ERROR` code could not help: the failure happened in the runtime, before
+`handleRequest` was called. Through the HTTP API the case is currently unreachable, because the
+mapping template always produces a string, but the fragility is structural: in architecture A,
+**anything the patterns did not anticipate is reported as success**.
+
+Closing it requires one more integration response with the pattern `.*` acting as a catch-all for
+errors, which also means giving up the pattern-free default used for the success case. Architecture
+B needs nothing, because `catch (RuntimeException)` has no gaps by construction.
+
+### 12.3 Required architecture diagram
+
+```mermaid
+flowchart TB
+    subgraph client["Client"]
+        C["curl, Postman, browser<br/>HTTP + JSON"]
+    end
+
+    subgraph aws["Amazon Web Services"]
+        G["API Gateway, REST API<br/>routes /orders and /orders/{id}<br/>ANY method, AWS_PROXY integration"]
+        L["AWS Lambda, orders-api-proxy<br/>java17 runtime, 512 MB<br/>deserializes the event, serializes the response"]
+    end
+
+    subgraph adapter["HTTP adapter, knows AWS and HTTP"]
+        H["OrdersApiProxyHandler<br/>routes on resource + method<br/>reads pathParameters, queryStringParameters, body<br/>maps exceptions to status codes"]
+        R["HttpResponses<br/>200 201 204 400 404 405 415 500<br/>Content-Type, Location, JSON body"]
+    end
+
+    subgraph app["Application, ordinary Java 17"]
+        S["OrderService<br/>createOrder, getOrder,<br/>getOrdersByCustomer, deleteOrder"]
+        M["Order, CreateOrderRequest<br/>OrderNotFoundException, InvalidOrderException"]
+        P["OrderRepository (port)<br/>InMemoryOrderRepository<br/>OrderIdGenerator"]
+    end
+
+    C -->|"1. HTTP request"| G
+    G -->|"2. proxy event, JSON"| L
+    L -->|"3. APIGatewayProxyRequestEvent"| H
+    H -->|"4. Java objects, Strings"| S
+    S --> M
+    S --> P
+    S -->|"5. Order, or an exception"| H
+    H --> R
+    R -->|"6. APIGatewayProxyResponseEvent"| L
+    L -->|"7. proxy response, JSON"| G
+    G -->|"8. HTTP response"| C
+
+    classDef awsStyle fill:#ff9900,stroke:#333,color:#000
+    classDef adapterStyle fill:#4b9cd3,stroke:#333,color:#fff
+    classDef plainStyle fill:#5cb85c,stroke:#333,color:#fff
+    class G,L awsStyle
+    class H,R adapterStyle
+    class S,M,P,C plainStyle
+```
+
+### 12.4 What depends on AWS and what does not
+
+| Component | Depends on AWS? | Evidence |
+|---|---|---|
+| API Gateway | it **is** AWS | configuration only, no code |
+| Lambda runtime | it **is** AWS | the `java17` managed runtime |
+| `OrdersApiProxyHandler` | **yes** | imports `RequestHandler`, `APIGatewayProxyRequestEvent`, `Context` |
+| `HttpResponses` | **yes** | imports `APIGatewayProxyResponseEvent` |
+| `OrderService` | **no** | would compile and run with the AWS dependencies removed |
+| `Order`, `CreateOrderRequest` | **no** | plain classes |
+| `OrderRepository`, `InMemoryOrderRepository` | **no** | a `Map` |
+| `OrderIdGenerator` | **no** | an `AtomicInteger` |
+| `OrderNotFoundException`, `InvalidOrderException` | **no** | they carry a business code, not a status |
+
+The dependency runs in one direction only: the adapter knows the application, and the application
+does not know the adapter exists. The verifiable form of that claim is that **no file under
+`model`, `service`, `repository` or `exception` contains the string `amazonaws`**, and that the
+same 517 lines of application code served architecture A, architecture B and all 82 tests. The
+only time that code changed after section 2 was to gain a new business operation, `deleteOrder`,
+never to suit an integration style.
+
+Moving this API to a different platform, a container with Spring, a plain HTTP server or another
+cloud, means writing a new adapter. It does not mean touching the application.
+
+### 12.5 Building, testing and reproducing it
+
+```bash
+mvn test            # 82 tests, no AWS, no network
+mvn package         # target/orders-api-1.0-SNAPSHOT.jar, the deployment package
+
+bash infrastructure/architecture-b/create-api.sh    # the final API
+bash infrastructure/architecture-a/create-api.sh    # the comparison, optional
+bash infrastructure/architecture-a/add-delete.sh    # DELETE for architecture A, optional
+```
+
+Prerequisites: Java 17 or newer, Maven 3.9, an AWS CLI with credentials, and an execution role for
+Lambda. The scripts read the account from `aws sts get-caller-identity` and expect a role named
+`LabRole`, which is what AWS Academy provides; on another account, change that one line.

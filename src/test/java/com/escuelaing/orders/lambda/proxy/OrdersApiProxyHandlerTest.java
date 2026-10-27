@@ -7,7 +7,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.amazonaws.services.lambda.runtime.events.APIGatewayProxyRequestEvent;
 import com.amazonaws.services.lambda.runtime.events.APIGatewayProxyResponseEvent;
+import com.escuelaing.orders.model.Order;
+import com.escuelaing.orders.repository.InMemoryOrderRepository;
 import com.escuelaing.orders.service.OrderService;
+import com.escuelaing.orders.service.SequentialOrderIdGenerator;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -230,6 +233,28 @@ class OrdersApiProxyHandlerTest {
 
         assertEquals(200, response.getStatusCode());
         assertEquals("Keyboard", body(response).get("product").asText());
+    }
+
+    @Test
+    void answers500AndHidesTheDetailsWhenSomethingUnexpectedFails() throws IOException {
+        // An application that breaks in a way nobody planned for. The adapter must not let the
+        // failure reach the client, and must not turn it into a 400 either.
+        OrderService broken = new OrderService(new InMemoryOrderRepository(),
+                new SequentialOrderIdGenerator()) {
+            @Override
+            public Order getOrder(String id) {
+                throw new IllegalStateException("connection pool exhausted at ConnectionPool:412");
+            }
+        };
+
+        APIGatewayProxyResponseEvent response = new OrdersApiProxyHandler(broken)
+                .handleRequest(capturedEvent("get-order-by-id.json"), null);
+
+        assertEquals(500, response.getStatusCode());
+        assertEquals("INTERNAL_ERROR", body(response).get("error").asText());
+        assertEquals("The request could not be processed", body(response).get("message").asText());
+        assertTrue(response.getBody().indexOf("connection pool") < 0);
+        assertTrue(response.getBody().indexOf("ConnectionPool") < 0);
     }
 
     @Test
